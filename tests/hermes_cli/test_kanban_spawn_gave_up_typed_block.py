@@ -37,8 +37,8 @@ def test_spawn_failed_trip_writes_typed_capability_block(kanban_home: Path) -> N
         tid = kb.create_task(conn, title="no repo to check out", assignee="worker")
         kb.claim_task(conn, tid)
         error = (
-            "workspace: task %s has workspace_kind=worktree but no workspace_path, "
-            "and board 'vx' has no default_workdir set." % tid
+            f"workspace: task {tid} has workspace_kind=worktree but no workspace_path, "
+            "and board 'vx' has no default_workdir set."
         )
         tripped = kbd._record_task_failure(
             conn, tid, error,
