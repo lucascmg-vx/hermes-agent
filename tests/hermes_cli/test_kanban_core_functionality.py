@@ -1354,8 +1354,11 @@ def test_dead_worker_reap_surfaces_the_workers_own_last_output(kanban_home, driv
         assert "Resume this session" not in (task.last_failure_error or "")
         assert "Query:" not in (task.last_failure_error or "")
         assert "│" not in (task.last_failure_error or "")
-        events = [e for e in kb.list_events(conn, tid) if e.kind in ("protocol_violation", "crashed")]
+        events = [e for e in kb.list_events(conn, tid) if e.kind in ("unreported_exit", "crashed")]
         assert len(events) == 1
+        assert events[0].kind == (
+            "unreported_exit" if drive is _drive_protocol_violation else "crashed"
+        )
         assert "no reassignment operation" in (events[0].payload or {}).get("worker_output", "")
     finally:
         conn.close()

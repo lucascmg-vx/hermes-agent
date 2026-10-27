@@ -8,7 +8,7 @@ from hermes_cli import kanban_db_dispatch as dispatch
 @pytest.mark.parametrize(
     "receipt, reaped, logged, event, rate_limited, terminal_provider",
     [
-        (0, ("unknown", None), None, "protocol_violation", False, False),
+        (0, ("unknown", None), None, "unreported_exit", False, False),
         (kb.KANBAN_RATE_LIMIT_EXIT_CODE, ("nonzero_exit", 1), None,
          "rate_limited", True, False),
         (kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE, ("unknown", None), None,
@@ -33,6 +33,12 @@ def test_dead_worker_classification_accepts_managed_and_legacy_results(
     assert result.event_kind == event
     assert result.rate_limited is rate_limited
     assert result.terminal_provider is terminal_provider
+    clean_exit = event == "unreported_exit"
+    assert result.unreported is clean_exit
+    assert result.protocol_violation is clean_exit
+    assert result.run_outcome == (
+        "unreported" if clean_exit else "rate_limited" if rate_limited else "crashed"
+    )
     expected_code = receipt if receipt is not None else reaped[1] if reaped[1] is not None else logged
     assert result.event_payload["exit_code"] == expected_code
     if rate_limited:

@@ -50,12 +50,12 @@ def _dead_worker_with_log(conn, tid: str, pid: int, rc: int) -> None:
 
 @pytest.mark.parametrize(
     "rc, event, failure_counted",
-    [(0, "protocol_violation", False), (kb.KANBAN_RATE_LIMIT_EXIT_CODE, "rate_limited", False)],
+    [(0, "unreported_exit", False), (kb.KANBAN_RATE_LIMIT_EXIT_CODE, "rate_limited", False)],
 )
 def test_fresh_process_sweep_books_the_logged_exit_code(kanban_home, rc, event, failure_counted):
-    """Empty reap registry + exit trailer in the log: a clean exit is the protocol violation
-    (marker, streak, no unified-budget hit) and a 75 is a rate-limit requeue — not a bare
-    ``pid N not alive`` crash that counts a failure."""
+    """Empty reap registry + exit trailer in the log: a clean exit is an unreported exit
+    (outcome ``unreported``, protocol-violation marker, streak, no unified-budget hit) and a
+    75 is a rate-limit requeue — not a bare ``pid N not alive`` crash that counts a failure."""
     with kbc.connect() as conn:
         tid = kb.create_task(conn, title="t", assignee="a")
         _dead_worker_with_log(conn, tid, 70001, rc)
@@ -76,6 +76,7 @@ def test_fresh_process_sweep_books_the_logged_exit_code(kanban_home, rc, event, 
         # the fact even though the worker_output tail is trimmed (#113611).
         assert kb._json_dict(run["metadata"]).get("exit_code") == rc
         if rc == 0:
+            assert run["outcome"] == "unreported"
             assert kb._json_dict(run["metadata"]).get("protocol_violation") is True
             assert kbd._protocol_violation_streak(conn, tid) == 1
             assert KANBAN_WORKER_EXIT_TRAILER not in (run["error"] or "")

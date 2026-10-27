@@ -202,7 +202,7 @@ def test_rate_limited_attempt_is_billed_once_and_requeued_without_a_failure(rate
     assert rl_events[0]["run_id"] == runs[0]["id"], diag
     assert all(t["consecutive_failures"] == 0 for t in f.ticks), diag
     assert b.task(tid)["consecutive_failures"] == 0, diag
-    for kind in ("crashed", "gave_up", "blocked", "protocol_violation"):
+    for kind in ("crashed", "gave_up", "blocked", "unreported_exit"):
         assert not b.events(tid, kind), f"{kind} event on a rate-limited card\n{diag}"
     # Cooldown is 0: the reap and the respawn happen on the SAME tick right after the 429 worker died.
     assert [t["spawned"] for t in f.ticks[:2]] == [1, 1], diag

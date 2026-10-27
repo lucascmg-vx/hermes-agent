@@ -185,7 +185,7 @@ def test_sigkilled_attempt_is_booked_as_a_crash_of_its_own(scenario: Scenario) -
     run2 = _run_of_attempt(sc, 2)
     assert run2["worker_pid"] == sc.w2
     kinds = [(e["kind"], e["payload"]) for e in sc.board.events(sc.tid) if e["run_id"] == run2["id"]]
-    booked = [(k, p) for k, p in kinds if k in ("crashed", "protocol_violation", "rate_limited")]
+    booked = [(k, p) for k, p in kinds if k in ("crashed", "unreported_exit", "rate_limited")]
     assert len(booked) == 1, kinds
     kind, payload = booked[0]
     with known_gate(KNOWN, "test_sigkilled_attempt_is_booked_as_a_crash_of_its_own", raises=KnownGap):
