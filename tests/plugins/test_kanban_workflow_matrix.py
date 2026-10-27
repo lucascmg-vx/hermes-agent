@@ -22,8 +22,9 @@ from hermes_cli import kanban_workflow as kw
 W = kw.DEFAULT_WORKFLOW
 
 # Accepted moves whose card lands somewhere other than the requested column.
-# review -> todo goes through reopen_review_task, which re-gates to ``ready``.
-_KNOWN_REDIRECTS = {("review", "todo"): "ready"}
+# review -> todo goes through reopen_review_task, which re-gates to ``ready``;
+# hold -> todo goes through unhold_task, which does the same.
+_KNOWN_REDIRECTS = {("review", "todo"): "ready", ("hold", "todo"): "ready"}
 
 
 def _load_plugin_router():

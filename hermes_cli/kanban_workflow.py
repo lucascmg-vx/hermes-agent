@@ -134,7 +134,9 @@ DEFAULT_WORKFLOW = Workflow(
         # (reopen_review_task ignores the requested target). Phase 1 fixes it.
         "review": ("triage", "todo", "ready", "done"),
         "done": ("triage", "todo", "ready"),
-        "hold": (),  # cleared only via kanban_unhold (creator) or `hermes kanban unhold`
+        # Both route through unhold_task (operator), which re-gates from the parents:
+        # todo/ready land in ``ready`` when every parent is done, ``todo`` otherwise.
+        "hold": ("todo", "ready"),
         ARCHIVED: ("triage", "todo", "ready"),  # restore from the archive filter
     }),
 )

@@ -579,12 +579,18 @@ _RUNNING_DIRECT_MSG = "Cannot set status to 'running' directly; use the dispatch
 def _drag_to(conn, task_id: str, s: str) -> bool:
     """Drag-drop into ready/todo/triage: blocked/scheduled -> ready re-opens via ``unblock_task``;
     leaving ``review`` goes through ``reopen_review_task`` (stale-run recovery, parent re-gate,
-    ``review_reopened`` event) instead of a raw write; ``triage`` needs no current-state query."""
+    ``review_reopened`` event) instead of a raw write; leaving ``hold`` for ready/todo goes
+    through ``unhold_task`` as an operator (landing re-gated from the parents, ``unheld``
+    event) — the CLI's release path; ``triage`` needs no current-state query (a held card
+    is refused there by ``_set_status_direct``)."""
     current = kanban_db.get_task(conn, task_id) if s != "triage" else None
     if s == "ready" and current and current.status in ("blocked", "scheduled"):
         return kanban_db.unblock_task(conn, task_id)
     if current is not None and current.status == "review":
         return kanban_db.reopen_review_task(conn, task_id)
+    if current is not None and current.status == "hold":
+        ok, _landing = kanban_db.unhold_task(conn, task_id, operator=True, operator_surface="dashboard")
+        return ok
     return _set_status_direct(conn, task_id, s)
 
 
@@ -652,7 +658,18 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
     if blockers:
         names = ", ".join(f"{p['title']!r} ({p['id']}, status={p['status']})" for p in blockers)
         raise _conflict(f"Cannot move to 'ready': blocked by parent(s) not done — {names}")
-    raise _conflict(_open_parent_refusal(conn, task_id, s) or f"status transition to {s!r} not valid from current state")
+    raise _conflict(_hold_refusal(conn, task_id, s) or _open_parent_refusal(conn, task_id, s)
+                    or f"status transition to {s!r} not valid from current state")
+
+
+def _hold_refusal(conn, task_id: str, s: str) -> Optional[str]:
+    """A held card leaves only through ready/todo (``unhold_task``); name that door
+    instead of the generic text when another target is refused."""
+    task = kanban_db.get_task(conn, task_id)
+    if task is None or task.status != "hold":
+        return None
+    return (f"cannot move {task_id} to {s!r}: it is held; move it to 'ready' or 'todo' to release "
+            f"the hold (re-gated from its parents), or run `hermes kanban unhold {task_id}`")
 
 
 def _open_parent_refusal(conn, task_id: str, s: str) -> Optional[str]:
@@ -750,8 +767,8 @@ def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) 
             "SELECT status, current_run_id, worker_pid, claim_lock, worker_started_at FROM tasks WHERE id = ?",
             (task_id,)).fetchone()
         if prev is None or prev["status"] == "hold":
-            # A create-time hold is released only via ``unhold_task`` (creator
-            # in-process, or ``hermes kanban unhold`` for an orphaned hold).
+            # A create-time hold leaves only through ``unhold_task`` (``_drag_to``
+            # routes ready/todo there); a raw write here would skip its parent re-gate.
             return False
         if prev["status"] == "running" and new_status == "ready":
             resume_status = kanban_db._retry_status_for_run(conn, task_id, prev["current_run_id"])
@@ -837,7 +854,8 @@ def _bulk_apply_one(conn, tid: str, payload: BulkTaskBody, board: Optional[str],
     if payload.status is not None and not payload.archive:
         s = payload.status
         if not _apply_status(conn, tid, s, payload, f"unknown status {s!r}"):
-            entry.update(ok=False, error=_open_parent_refusal(conn, tid, s) or f"transition to {s!r} refused")
+            entry.update(ok=False, error=_hold_refusal(conn, tid, s) or _open_parent_refusal(conn, tid, s)
+                         or f"transition to {s!r} refused")
     if payload.assignee is not None:
         try:
             ok = (kanban_db.reassign_task(conn, tid, payload.assignee or None, reclaim_first=True) if payload.reclaim_first

@@ -2134,9 +2134,12 @@ def hold_clear_status(conn: sqlite3.Connection, task_id: str) -> str:
 def unhold_task(
     conn: sqlite3.Connection, task_id: str, *,
     requester: Optional[str] = None, requester_session: Optional[str] = None,
-    operator: bool = False,
+    operator: bool = False, operator_surface: str = "operator",
 ) -> tuple[bool, str]:
     """Clear a create-time hold: ``hold`` -> ``ready``/``todo`` per the graph.
+
+    The single exit from ``hold``: every surface that releases one (the creator's
+    ``kanban_unhold``, ``hermes kanban unhold``, a dashboard drag) routes here.
 
     Returns ``(ok, detail)``; ``detail`` is the landing status on success and the
     refusal reason otherwise. Only the card's creator may clear it in-process:
@@ -2144,8 +2147,9 @@ def unhold_task(
     that. Both are read from the runtime by the caller rather than trusted from a
     name in an argument, so a caller cannot release a hold by asserting someone
     else's identity. A card that recorded no session has no second key to compare
-    and is keyed on the profile alone; ``operator=True`` (the CLI) clears any
-    hold -- the escape hatch for a hold whose creator died mid-filing.
+    and is keyed on the profile alone; ``operator=True`` (the CLI, the dashboard)
+    clears any hold -- the escape hatch for a hold whose creator died mid-filing.
+    ``operator_surface`` names that surface in the ``unheld`` event's ``actor``.
     """
     with write_txn(conn):
         row = conn.execute(
@@ -2169,7 +2173,7 @@ def unhold_task(
         )
         _append_event(
             conn, task_id, "unheld",
-            {"status": status, "actor": "operator" if operator else (requester or "creator")},
+            {"status": status, "actor": operator_surface if operator else (requester or "creator")},
         )
     return True, status
 

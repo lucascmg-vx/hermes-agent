@@ -277,12 +277,70 @@ def test_hold_is_a_real_status_every_surface_can_see(kanban_home):
         assert [t.id for t in kb.list_tasks(conn, status="hold")] == [tid]
 
 
-def test_dashboard_drag_cannot_clear_a_hold(kanban_home):
-    """Dashboard drag/PATCH to ready/todo/triage must refuse a held card."""
+@pytest.fixture
+def dashboard(kanban_home):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from plugins.kanban.dashboard import plugin_api
+
+    app = FastAPI()
+    app.include_router(plugin_api.router, prefix="/k")
+    return TestClient(app)
+
+
+def test_dashboard_drag_releases_a_hold_only_through_unhold(dashboard):
+    """A drag to ``ready`` is an operator release: one ``unheld`` event, no raw
+    ``status`` write, and the card is claimable only after that release."""
+    with kbc.connect_closing() as conn:
+        tid = _hold(conn, created_by="filer", session_id="s1")
+
+    r = dashboard.patch(f"/k/tasks/{tid}", json={"status": "ready"})
+    assert r.status_code == 200, r.text
+    assert r.json()["task"]["status"] == "ready"
+    with kbc.connect_closing() as conn:
+        unheld = _events(conn, tid, "unheld")
+        assert [e.payload for e in unheld] == [{"status": "ready", "actor": "dashboard"}]
+        assert _events(conn, tid, "status") == [], "the hold must not leave by direct write"
+        assert kb.claim_task(conn, tid, claimer="worker") is not None
+
+
+def test_dashboard_drag_never_promotes_a_hold_past_an_open_parent(dashboard):
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+
+    for target in ("ready", "todo"):
+        with kbc.connect_closing() as conn:
+            tid = _hold(conn, title=f"child-{target}", parents=(parent,))
+        r = dashboard.patch(f"/k/tasks/{tid}", json={"status": target})
+        assert r.status_code == 200, r.text
+        with kbc.connect_closing() as conn:
+            assert kb.get_task(conn, tid).status == "todo", target
+            assert _events(conn, tid, "unheld")[-1].payload == {"status": "todo", "actor": "dashboard"}
+            assert kb.claim_task(conn, tid, claimer="worker") is None
+
+
+@pytest.mark.parametrize("target", ["triage", "blocked", "scheduled", "review", "done"])
+def test_dashboard_refuses_every_other_exit_from_hold(dashboard, target):
+    with kbc.connect_closing() as conn:
+        tid = _hold(conn)
+
+    body = {"status": target, **({"summary": "s"} if target in ("done", "review") else {})}
+    r = dashboard.patch(f"/k/tasks/{tid}", json=body)
+    assert r.status_code == 409, r.text
+    assert "it is held" in r.json()["detail"]
+    bulk = dashboard.post("/k/tasks/bulk", json={"ids": [tid], **body}).json()["results"][0]
+    assert bulk["ok"] is False and "it is held" in bulk["error"]
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "hold"
+        assert _events(conn, tid, "unheld") == []
+
+
+def test_direct_status_write_refuses_a_hold(kanban_home):
+    """The raw writer behind drag stays closed to a hold even if called directly."""
     from plugins.kanban.dashboard import plugin_api
 
     with kbc.connect_closing() as conn:
         tid = _hold(conn)
         for target in ("ready", "todo", "triage"):
-            assert plugin_api._drag_to(conn, tid, target) is False
+            assert plugin_api._set_status_direct(conn, tid, target) is False
             assert kb.get_task(conn, tid).status == "hold"
