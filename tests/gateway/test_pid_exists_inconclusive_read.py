@@ -109,19 +109,62 @@ def test_confirmed_dead_is_tri_state(monkeypatch):
     assert gstatus._pid_confirmed_dead(os.getpid()) is False
 
 
-def test_access_denied_falls_through_to_pid_exists(monkeypatch):
-    """Non-NoSuchProcess errors (e.g. AccessDenied) must fall through to psutil.pid_exists."""
-    import psutil
+class _PosixOs(types.ModuleType):
+    """``os`` as seen by ``gateway.status``, but reporting ``name == "posix"``.
+
+    On Windows ``_pid_exists`` short-circuits to ``pid_exists_stdlib`` before
+    psutil is consulted, so without this the fall-through below would pass
+    without ever being exercised there.
+    """
+
+    name = "posix"
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        pytest.param(lambda psutil, pid: psutil.AccessDenied(pid), id="AccessDenied"),
+        pytest.param(lambda psutil, pid: psutil.Error("probe failed"), id="psutil.Error"),
+    ],
+)
+def test_non_nosuchprocess_failure_falls_through_to_pid_exists(monkeypatch, make_error):
+    """A status() failure other than NoSuchProcess (AccessDenied on Windows/macOS
+    for protected or other users' processes) is inconclusive: it must resolve via
+    the authoritative ``psutil.pid_exists()`` instead of raising out of
+    ``_pid_exists`` and crashing ``is_gateway_running`` / the reclaim sweep."""
+    psutil = pytest.importorskip("psutil")
 
     pid = os.getpid()
+    error = make_error(psutil, pid)
+    assert not isinstance(error, psutil.NoSuchProcess)
 
-    class _AccessDeniedProcess:
+    class _FailingProcess:
         def __init__(self, _pid):
             pass
 
         def status(self):
-            raise psutil.AccessDenied(pid)
+            raise error
 
-    monkeypatch.setattr(psutil, "Process", _AccessDeniedProcess)
-    monkeypatch.setattr(psutil, "pid_exists", lambda p: p == pid)
+    consulted = []
+
+    def _pid_exists(p):
+        consulted.append(p)
+        return p == pid
+
+    def _not_consulted(_pid):
+        raise AssertionError("only a NoSuchProcess read is confirmed against /proc")
+
+    monkeypatch.setattr(gstatus, "os", _PosixOs("os"))
+    monkeypatch.setattr(psutil, "Process", _FailingProcess)
+    monkeypatch.setattr(psutil, "pid_exists", _pid_exists)
+    monkeypatch.setattr(gstatus, "_pid_confirmed_dead", _not_consulted)
+
     assert gstatus._pid_exists(pid) is True
+    assert consulted == [pid], "pid_exists() must decide an inconclusive read"
+
+    consulted.clear()
+    assert gstatus._pid_exists(pid + 1) is False, "pid_exists() still reports absence"
+    assert consulted == [pid + 1]
