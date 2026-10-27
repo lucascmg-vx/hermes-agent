@@ -18,11 +18,13 @@ up with ``assignee=None``.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import projects_db as _pdb
 from hermes_cli.kanban_db_graph import decompose_triage_task
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import profiles as profiles_mod
@@ -77,8 +79,10 @@ Rules:
     child's own work, NOT by copying the parent's repo: one card routinely
     fans out across repositories (a UI child and an API child belong to
     different checkouts). Use null only when the child needs no repository
-    at all. A child that needs a checkout but names no repo cannot be
-    dispatched, and the decomposition is rejected.
+    at all (research, writing, analysis): it then runs in a scratch
+    directory with no checkout, even when the parent card sits in a repo.
+    Use only names from the list below; any other value rejects the whole
+    decomposition.
   - Each child task body is what a fresh worker will read with no other
     context — be specific about goal, approach, and acceptance criteria.
 
@@ -208,12 +212,10 @@ def _build_repos() -> list[dict]:
     then offers no repos and anchoring falls back to the board default.
     """
     try:
-        from hermes_cli import projects_db as _pdb
-
         with _pdb.connect_closing() as conn:
             projects = _pdb.list_projects(conn)
-    except Exception:
-        logger.debug("decompose: project registry unreadable; offering no repo choices")
+    except Exception as exc:
+        logger.warning("decompose: project registry unreadable (%s); offering no repo choices", exc)
         return []
     return [
         {"name": p.slug, "path": str(p.primary_path), "project_id": p.id}
@@ -224,32 +226,48 @@ def _build_repos() -> list[dict]:
 
 def _format_repos(repos: list[dict]) -> str:
     if not repos:
-        return '  (none registered — omit "repo" or set it to null)'
+        return '  (none registered — omit "repo"; null still means the child needs no checkout)'
     return "\n".join(f"  - {r['name']}: {r['path']}" for r in repos)
 
 
-def _resolve_repo_choice(task_id: str, idx: int, choice: object, repos: list[dict]) -> dict:
-    """Workspace fields for one child, or ``{}`` when it named no repo.
+_REPO_KEY_MISSING = object()
 
-    An unknown name is dropped with a log rather than fuzzy-matched: the DB
-    layer refuses an unanchored worktree child loudly, and a loud stall beats
-    checking the work out into whichever repo happened to look similar.
+
+def _resolve_repo_choice(idx: int, choice: object, repos: list[dict]) -> tuple[dict, str]:
+    """``(workspace_fields, "")`` for one child's ``repo``, or ``({}, reason)``.
+
+    - key absent / blank string: ``{}`` -- the child inherits the root's
+      workspace kind, and the DB layer refuses it if that leaves an
+      unanchored worktree.
+    - explicit ``null``: the model said the child needs no checkout, so it
+      runs in scratch whatever the root's kind.
+    - a slug (case-insensitive) or an absolute path of a registered repo:
+      that repo's worktree fields.
+    - anything else is refused, never fuzzy-matched or dropped: dropping it
+      would let a scratch root run the child with no checkout at all.
     """
-    if not isinstance(choice, str) or not choice.strip():
-        return {}
+    if choice is _REPO_KEY_MISSING:
+        return {}, ""
+    if choice is None:
+        return {"workspace_kind": "scratch"}, ""
+    if not isinstance(choice, str):
+        return {}, f"tasks[{idx}].repo must be a repo name or null, got {type(choice).__name__}"
     wanted = choice.strip()
+    if not wanted:
+        return {}, ""
+    wanted_slug = wanted.casefold()
+    expanded = os.path.expanduser(wanted)
+    wanted_path = _pdb._primary_path_key(expanded) if os.path.isabs(expanded) else None
     for repo in repos:
-        if wanted in (repo["name"], repo["path"]):
+        if wanted_slug == repo["name"].casefold() or (
+            wanted_path is not None and wanted_path == _pdb._primary_path_key(repo["path"])
+        ):
             return {
                 "workspace_kind": "worktree",
                 "workspace_path": repo["path"],
                 "project_id": repo["project_id"],
-            }
-    logger.info(
-        "decompose: task %s child %d named unknown repo %r — leaving it unanchored",
-        task_id, idx, wanted,
-    )
-    return {}
+            }, ""
+    return {}, f"tasks[{idx}].repo {wanted!r} is not a registered repo"
 
 
 @dataclass
@@ -325,7 +343,9 @@ def _clean_children(task_id: str, raw_tasks: list, routing: _Routing) -> tuple[l
         parents = entry.get("parents") or []
         if not isinstance(parents, list):
             parents = []
-        repo = _resolve_repo_choice(task_id, idx, entry.get("repo"), routing.repos)
+        repo, reason = _resolve_repo_choice(idx, entry.get("repo", _REPO_KEY_MISSING), routing.repos)
+        if reason:
+            return [], reason
         children.append({
             "title": title.strip()[:200],
             "body": body.strip() if isinstance(body, str) else "",

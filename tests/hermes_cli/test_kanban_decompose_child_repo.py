@@ -17,6 +17,7 @@ the ``boards set-default-workdir`` command uses.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -204,25 +205,135 @@ REPOS = [
 
 
 def test_a_named_repo_becomes_workspace_fields():
-    assert kd._resolve_repo_choice("t_1", 0, "vx-processes", REPOS) == {
+    assert kd._resolve_repo_choice(0, "vx-processes", REPOS) == ({
         "workspace_kind": "worktree",
         "workspace_path": "/code/internal_processes",
         "project_id": "p_b",
-    }
+    }, "")
 
 
 def test_a_repo_may_be_named_by_path():
-    assert kd._resolve_repo_choice("t_1", 0, "/code/website-frontend", REPOS)["project_id"] == "p_a"
+    fields, reason = kd._resolve_repo_choice(0, "/code/website-frontend", REPOS)
+    assert (fields["project_id"], reason) == ("p_a", "")
 
 
-@pytest.mark.parametrize("choice", [None, "", "   ", 7, {"name": "x"}])
+def test_the_slug_match_ignores_case():
+    fields, reason = kd._resolve_repo_choice(0, "VX-Processes", REPOS)
+    assert (fields["project_id"], reason) == ("p_b", "")
+
+
+def test_the_path_match_uses_the_registry_path_key(tmp_path):
+    """Trailing separators (and, on Windows, case) must not hide a real repo."""
+    repo = tmp_path / "code" / "frontend"
+    repos = [{"name": "front", "path": str(repo), "project_id": "p_f"}]
+    spelled = str(repo) + os.sep
+    if os.name == "nt":
+        spelled = spelled.upper()
+    fields, reason = kd._resolve_repo_choice(0, spelled, repos)
+    assert (fields["workspace_path"], reason) == (str(repo), "")
+
+
+@pytest.mark.parametrize("choice", [kd._REPO_KEY_MISSING, "", "   "])
 def test_no_repo_named_leaves_the_child_alone(choice):
-    assert kd._resolve_repo_choice("t_1", 0, choice, REPOS) == {}
+    assert kd._resolve_repo_choice(0, choice, REPOS) == ({}, "")
 
 
-def test_an_unknown_repo_is_dropped_not_guessed():
+def test_an_explicit_null_repo_means_scratch():
+    assert kd._resolve_repo_choice(0, None, REPOS) == ({"workspace_kind": "scratch"}, "")
+
+
+def test_an_unknown_repo_is_refused_not_guessed():
     """'website' is a prefix of a real entry — a fuzzy match would pick it."""
-    assert kd._resolve_repo_choice("t_1", 0, "website", REPOS) == {}
+    fields, reason = kd._resolve_repo_choice(3, "website", REPOS)
+    assert fields == {}
+    assert reason == "tasks[3].repo 'website' is not a registered repo"
+
+
+def test_a_relative_name_is_not_resolved_against_the_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    repos = [{"name": "front", "path": str(tmp_path / "frontend"), "project_id": "p_f"}]
+    assert kd._resolve_repo_choice(0, "frontend", repos)[1]
+
+
+@pytest.mark.parametrize("choice", [7, {"name": "x"}, ["front"]])
+def test_a_non_string_repo_is_refused(choice):
+    fields, reason = kd._resolve_repo_choice(0, choice, REPOS)
+    assert fields == {} and "must be a repo name or null" in reason
+
+
+# --------------------------------------------------------------------------
+# End to end through the fan-out: the model's JSON decides each child's repo.
+# --------------------------------------------------------------------------
+
+def _routing(repos):
+    return kd._Routing(
+        orchestrator="orchestrator", default_assignee="a", auto_promote=False,
+        roster=[], valid_names={"a"}, repos=repos,
+    )
+
+
+def _child_json(title, **extra):
+    return {"title": title, "body": "", "assignee": "a", "parents": [], **extra}
+
+
+def test_an_unknown_repo_fails_the_fanout_on_a_scratch_root(kanban_home):
+    """Dropping the name would run the child in scratch with no checkout."""
+    with kbc.connect() as conn:
+        tid = _triage(conn, title="ship a feature")
+        before = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+
+    outcome = kd._apply_fanout(tid, {"fanout": True, "tasks": [
+        _child_json("good", repo="vx-processes"),
+        _child_json("typo", repo="vx-proceses"),
+    ]}, _routing(REPOS), "decomposer")
+
+    assert not outcome.ok
+    assert outcome.reason == "tasks[1].repo 'vx-proceses' is not a registered repo"
+    with kbc.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before
+        assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_an_explicit_null_repo_runs_in_scratch_under_a_worktree_root(kanban_home, tmp_path):
+    """A research child needs no checkout; it must not sink its repo siblings."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="root in a repo", triage=True,
+            workspace_kind="worktree", workspace_path=str(tmp_path / "code" / "frontend"),
+        )
+
+    outcome = kd._apply_fanout(tid, {"fanout": True, "tasks": [
+        _child_json("research", repo=None),
+        _child_json("build", repo="vx-website-frontend"),
+    ]}, _routing(REPOS), "decomposer")
+
+    assert outcome.ok, outcome.reason
+    with kbc.connect() as conn:
+        research, build = (kb.get_task(conn, cid) for cid in outcome.child_ids)
+    assert (research.workspace_kind, research.workspace_path, research.project_id) == (
+        "scratch", None, None,
+    )
+    assert (build.workspace_kind, build.workspace_path, build.project_id) == (
+        "worktree", "/code/website-frontend", "p_a",
+    )
+
+
+def test_a_missing_repo_key_under_a_worktree_root_is_still_refused(kanban_home, tmp_path):
+    """Only an explicit null opts out; silence still inherits the root's kind."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="root in a repo", triage=True,
+            workspace_kind="worktree", workspace_path=str(tmp_path / "code" / "frontend"),
+        )
+
+    outcome = kd._apply_fanout(
+        tid, {"fanout": True, "tasks": [_child_json("child")]}, _routing(REPOS), "decomposer",
+    )
+
+    assert not outcome.ok
+    assert "worktree task with no repo" in outcome.reason
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, tid).status == "triage"
 
 
 def test_the_prompt_offers_the_registered_repos():
