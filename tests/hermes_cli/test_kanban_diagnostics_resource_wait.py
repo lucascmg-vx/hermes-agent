@@ -91,6 +91,20 @@ def test_an_unblock_clears_it():
     assert _only(kd.compute_task_diagnostics(_task(), events, [], now=now), "stale_resource_wait") == []
 
 
+def test_a_resource_unblock_loop_is_caught_by_block_unblock_cycling():
+    """Each re-block restarts this rule's clock, so a loop of short resource
+    waits never ages past the window here; the kind-agnostic cycling rule is
+    what surfaces it."""
+    now = int(time.time())
+    events = []
+    for start in (now - 3600 * 6, now - 3600 * 4, now - 3600 * 2):
+        events += [_event("claimed", start), _block_event(start + 60), _event("unblocked", start + 1800)]
+    events += [_event("claimed", now - 660), _block_event(now - 600)]
+    diags = kd.compute_task_diagnostics(_task(), events, [], now=now)
+    assert _only(diags, "stale_resource_wait") == []
+    assert _only(diags, "block_unblock_cycling")[0].count == 3
+
+
 def test_ignores_other_block_kinds():
     now = int(time.time())
     for kind in ("needs_input", "capability", "transient", "dependency", None):

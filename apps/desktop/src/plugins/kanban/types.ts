@@ -28,7 +28,7 @@ export interface KanbanTask {
   last_heartbeat_at?: null | number
   /** Typed block reason set by the backend on kanban_block (one of
    *  VALID_BLOCK_KINDS — `dependency`, `needs_input`, `capability`,
-   *  `transient`; null for legacy/un-typed blocks). Kept across unblock, so
+   *  `transient`, `resource`; null for legacy/un-typed blocks). Kept across unblock, so
    *  render it as CURRENT only while status is `blocked`. */
   block_kind?: null | string
   /** Unblock-loop counter — how many times this task re-blocked for the same

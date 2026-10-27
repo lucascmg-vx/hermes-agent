@@ -38,6 +38,13 @@ def test_agent_tool_status_enum_covers_every_status():
     assert set(enum) == kb.VALID_STATUSES
 
 
+def test_agent_tool_block_kind_enum_covers_every_block_kind():
+    # Was missing resource, so a worker could not report a peer-held lease.
+    schema = next(s for s in _all_tool_schemas() if s["name"] == "kanban_block")
+    enum = schema["parameters"]["properties"]["kind"]["enum"]
+    assert enum == sorted(kb.VALID_BLOCK_KINDS)
+
+
 def _all_tool_schemas():
     for value in vars(kanban_tools_schemas).values():
         if isinstance(value, dict) and "name" in value and "parameters" in value:

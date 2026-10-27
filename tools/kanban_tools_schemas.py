@@ -172,10 +172,13 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "goes to todo and auto-resumes when that task finishes, no human "
         "needed), 'needs_input' (you need a human decision/answer), "
         "'capability' (a hard wall: no access, missing credentials, an action "
-        "no agent can do), or 'transient' (a flaky failure that may clear). "
+        "no agent can do), 'transient' (a flaky failure that may clear), or "
+        "'resource' (a peer holds something you need — a write lease, a "
+        "rate-limited seat; you did not fail). "
         "``reason`` is shown to the human on the board. If a task keeps "
         "getting unblocked and re-blocked for the same reason, it is "
-        "auto-escalated to triage. Use for genuine blockers only — don't "
+        "auto-escalated to triage; 'resource' waits do not count toward "
+        "that limit. Use for genuine blockers only — don't "
         "block on things you can resolve yourself."
     ),
     {
@@ -187,11 +190,14 @@ KANBAN_BLOCK_SCHEMA = _schema(
         )),
         "kind": {
             "type": "string",
-            "enum": ["dependency", "needs_input", "capability", "transient"],
+            "enum": ["capability", "dependency", "needs_input", "resource", "transient"],
             "description": (
                 "Why you're blocked. 'dependency' waits in todo and "
                 "resumes automatically when an incomplete parent finishes; "
                 "if no parent is open it is recorded as needs_input instead. "
+                "'resource' means a peer holds something you need (a write "
+                "lease, a rate-limited seat) — you did not fail, so it does "
+                "NOT count toward the unblock-loop limit. "
                 "The others surface to a human. Omit only if none apply."
             ),
         },

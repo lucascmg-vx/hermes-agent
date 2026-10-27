@@ -3249,8 +3249,9 @@ def _route_block(
         # kinds, but CARRIES the previous recurrence count rather than
         # incrementing it. It therefore neither trips the loop breaker nor
         # launders a genuine loop that was already under way. Visibility is not
-        # lost: ``stuck_in_blocked`` still fires on age, so a card parked
-        # forever behind a lease that never frees is still surfaced.
+        # lost: ``stale_resource_wait`` fires on age (``stuck_in_blocked``
+        # skips resource waits), so a card parked forever behind a lease that
+        # never frees is still surfaced.
         payload["recurrences"] = prev_recurrences
         payload["resource_wait"] = True
         return ("blocked", "blocked",

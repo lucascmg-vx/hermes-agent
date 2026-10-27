@@ -356,7 +356,9 @@ export const en: KanbanMessages = {
         ? 'The worker hit a capability wall it cannot get past.'
         : kind === 'transient'
           ? 'The worker failed on a transient error.'
-          : 'The worker reported a dependency it must wait on.',
+          : kind === 'resource'
+            ? 'The worker is waiting for a resource another task holds (a write lease, a rate-limited seat).'
+            : 'The worker reported a dependency it must wait on.',
   blockReason: 'Block kind',
   blockRecurrences: 'Block recurrences',
   blockRecurrencesTip: 'Times this task re-blocked for the same reason after a human unblock.',
@@ -583,7 +585,9 @@ const ja: KanbanMessages = {
         ? 'ワーカーが越えられない能力の壁に当たりました。'
         : kind === 'transient'
           ? 'ワーカーが一時的なエラーで失敗しました。'
-          : 'ワーカーが待機すべき依存関係を報告しました。',
+          : kind === 'resource'
+            ? 'ワーカーは別のタスクが保持しているリソース（書き込みリース、レート制限枠など）を待っています。'
+            : 'ワーカーが待機すべき依存関係を報告しました。',
   blockReason: 'ブロック種別',
   blockRecurrences: 'ブロック回数',
   blockRecurrencesTip: '人間がブロック解除した後、同じ理由で再ブロックされた回数。',
@@ -809,7 +813,9 @@ const zh: KanbanMessages = {
         ? '工作单元遇到了无法逾越的能力限制。'
         : kind === 'transient'
           ? '工作单元因临时性错误失败。'
-          : '工作单元报告了需要等待的依赖。',
+          : kind === 'resource'
+            ? '工作单元正在等待另一个任务持有的资源（如写入租约、限流配额）。'
+            : '工作单元报告了需要等待的依赖。',
   blockReason: '阻塞类型',
   blockRecurrences: '阻塞次数',
   blockRecurrencesTip: '人工解除阻塞后，该任务因同一原因再次阻塞的次数。',
@@ -1033,7 +1039,9 @@ const zhHant: KanbanMessages = {
         ? '工作單元遇到了無法跨越的能力限制。'
         : kind === 'transient'
           ? '工作單元因暫時性錯誤失敗。'
-          : '工作單元回報了需要等待的相依關係。',
+          : kind === 'resource'
+            ? '工作單元正在等待另一個任務持有的資源（如寫入租約、限流配額）。'
+            : '工作單元回報了需要等待的相依關係。',
   blockReason: '封鎖類型',
   blockRecurrences: '封鎖次數',
   blockRecurrencesTip: '人工解除封鎖後，該任務因同一原因再次封鎖的次數。',
