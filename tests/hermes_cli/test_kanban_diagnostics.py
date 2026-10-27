@@ -260,12 +260,31 @@ def test_worktree_without_checkout_root_fires_on_a_board_with_no_default():
     assert "--project" in diags[0].actions[0].payload["command"]
 
 
-def test_worktree_without_checkout_root_escalates_once_it_is_failing():
+@pytest.mark.parametrize("failures", [1, 3])
+def test_worktree_without_checkout_root_escalates_once_it_is_failing(failures):
     """0 failures = mis-created; >0 = actively burning dispatch attempts."""
-    diags = _wt_diags(_worktree_task(consecutive_failures=3))
+    diags = _wt_diags(_worktree_task(consecutive_failures=failures))
     assert len(diags) == 1
     assert diags[0].severity == "critical"
-    assert diags[0].data["consecutive_failures"] == 3
+    assert diags[0].data["consecutive_failures"] == failures
+
+
+def test_worktree_without_checkout_root_needs_the_board_default_from_the_caller():
+    """Without board context the rule cannot tell which board judges the
+    task, so it reports nothing instead of assuming the board has no root."""
+    assert _wt_diags(_worktree_task(), config={}) == []
+
+
+def test_worktree_without_checkout_root_strips_the_board_default_like_the_resolver():
+    """The resolver strips default_workdir, so a blank one is no anchor."""
+    assert len(_wt_diags(_worktree_task(),
+                         config={"board_default_workdir": "   "})) == 1
+
+
+def test_worktree_without_checkout_root_takes_a_blank_task_path_as_set():
+    """The resolver tests workspace_path by truthiness: "   " goes down the
+    explicit-path branch and fails as non-absolute, not as a missing root."""
+    assert _wt_diags(_worktree_task(workspace_path="   ")) == []
 
 
 def test_worktree_without_checkout_root_silent_when_board_has_a_default():
@@ -318,21 +337,38 @@ def test_read_board_default_workdir_normalizes_unset():
     assert kd.read_board_default_workdir(_Stub({"default_workdir": "/srv/r"})) == "/srv/r"
 
 
-def test_worktree_without_checkout_root_matches_the_resolver(kanban_home):
+@pytest.mark.parametrize(
+    "task_path, board_default, resolver_error, fires",
+    [
+        (None, None, "has no default_workdir", True),
+        (None, "   ", "has no default_workdir", True),
+        ("   ", None, "non-absolute worktree path", False),
+    ],
+    ids=["nothing", "blank-board-default", "blank-task-path"],
+)
+def test_worktree_without_checkout_root_matches_the_resolver(
+        kanban_home, task_path, board_default, resolver_error, fires):
     """Pin the rule to the code it predicts.
 
     The rule is only useful if it fires exactly when resolve_workspace
-    refuses to dispatch, so assert both against one real task instead of
-    trusting a hand-built fixture.
+    refuses to dispatch for want of a checkout root, so assert both against
+    one real task instead of trusting a hand-built fixture.
     """
     conn = kbc.connect()
     try:
         task_id = kb.create_task(
             conn, title="fix something", assignee="demo", workspace_kind="worktree")
+        if task_path is not None:
+            conn.execute("UPDATE tasks SET workspace_path = ? WHERE id = ?",
+                         (task_path, task_id))
+            conn.commit()
+        if board_default is not None:
+            kb.write_board_metadata(None, default_workdir=board_default)
         task = kb.get_task(conn, task_id)
-        with pytest.raises(ValueError, match="default_workdir"):
+        with pytest.raises(ValueError, match=resolver_error):
             kbw.resolve_workspace(task)
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        assert _wt_diags(row)
+        config = {"board_default_workdir": kd.read_board_default_workdir(kb)}
+        assert bool(_wt_diags(row, config=config)) is fires
     finally:
         conn.close()

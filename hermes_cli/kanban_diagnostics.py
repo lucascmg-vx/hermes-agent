@@ -253,6 +253,15 @@ def _positive_int(value: Any, default: int) -> int:
     return parsed if parsed >= 1 else default
 
 
+def _count(value: Any) -> int:
+    """A stored counter or timestamp as a non-negative int; NULL reads as 0."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
+
+
 def _rule_hallucinated_cards(task, events, runs, now, cfg) -> list[Diagnostic]:
     """A worker's kanban_complete named created_cards that don't exist / weren't
     its own; the completion was blocked. Clears on a later completion/edit."""
@@ -808,8 +817,7 @@ def _rule_stale_running(task, events, runs, now, cfg) -> list[Diagnostic]:
 
 
 # Sentinel: tells "the caller did not supply board_default_workdir" apart
-# from "the caller supplied it and the board genuinely has none". Only the
-# former falls back to reading board metadata.
+# from "the caller supplied it and the board genuinely has none".
 _BOARD_WORKDIR_UNSET = object()
 
 # A worktree task in one of these is never dispatched again, so a missing
@@ -858,12 +866,17 @@ def _rule_worktree_without_checkout_root(task, events, runs, now, cfg) -> list[D
     repo stays with the operator.
 
     Config: ``board_default_workdir`` -- the default workdir of the board
-    this task lives on. Callers that do not supply it get the current
-    board, which is right for the CLI and wrong for a multi-board process.
+    this task lives on (``read_board_default_workdir``). Required: without
+    it the rule cannot know which board the task is judged against, so a
+    caller that omits it gets no finding rather than a guess.
+
+    The emptiness tests copy the resolver's exactly: ``workspace_path`` by
+    plain truthiness (a whitespace-only path takes the explicit-path branch
+    and fails there, not here), ``default_workdir`` after ``strip()``.
     """
     if _task_field(task, "workspace_kind") != "worktree":
         return []
-    if str(_task_field(task, "workspace_path") or "").strip():
+    if _task_field(task, "workspace_path"):
         return []
     status = str(_task_field(task, "status") or "")
     if status in _WORKTREE_TERMINAL_STATUSES:
@@ -871,16 +884,12 @@ def _rule_worktree_without_checkout_root(task, events, runs, now, cfg) -> list[D
 
     default_workdir = cfg.get("board_default_workdir", _BOARD_WORKDIR_UNSET)
     if default_workdir is _BOARD_WORKDIR_UNSET:
-        try:
-            from hermes_cli import kanban_db as _kb
-            default_workdir = read_board_default_workdir(_kb)
-        except Exception:
-            default_workdir = ""
-    if str(default_workdir or "").strip():
+        return []
+    if (default_workdir or "").strip():
         return []
 
     project_id = str(_task_field(task, "project_id") or "").strip()
-    failures = _positive_int(_task_field(task, "consecutive_failures"), 0)
+    failures = _count(_task_field(task, "consecutive_failures"))
     # 0 = mis-created but not yet dispatched; anything else = already
     # burning attempts against a fault that retrying cannot clear.
     severity = "critical" if failures else "error"
@@ -916,7 +925,7 @@ def _rule_worktree_without_checkout_root(task, events, runs, now, cfg) -> list[D
         ]
 
     # int, never None: compute_task_diagnostics sorts on last_seen_at.
-    created_at = _positive_int(_task_field(task, "created_at"), 0)
+    created_at = _count(_task_field(task, "created_at"))
     return [Diagnostic(
         kind="worktree_without_checkout_root", severity=severity,
         title="Worktree task has no repo to check out in",
