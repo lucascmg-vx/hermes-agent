@@ -102,9 +102,9 @@ def test_clean_exit_with_checkpoint_parks_card_instead_of_re_running(kanban_home
         run_id = _claim(conn, tid, heartbeats=3, notes=True)
         checkpoint_id = kb.add_comment(
             conn, tid, author="worker",
-            body="**checkpoint (run %s)** — PR opened: "
+            body=f"**checkpoint (run {run_id})** — PR opened: "
                  "https://github.com/The-ValueExchange/website-frontend/pull/839 "
-                 "(base development)" % run_id,
+                 "(base development)",
         )
 
         crashed, parked = _reap_clean_exit(conn, tid, 991100)
