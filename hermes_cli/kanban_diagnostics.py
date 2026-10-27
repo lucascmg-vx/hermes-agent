@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 
 
 # Least → most urgent; sorted outputs put critical first.
@@ -460,7 +460,7 @@ def _fmt_run_ts(ts: Any) -> str:
         return "an unrecorded time"
     if value <= 0:
         return "an unrecorded time"
-    return datetime.fromtimestamp(value, tz=timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+    return datetime.fromtimestamp(value, tz=UTC).strftime("%Y-%m-%d %H:%MZ")
 
 
 def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
