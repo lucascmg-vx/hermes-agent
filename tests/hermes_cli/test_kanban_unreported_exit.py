@@ -230,3 +230,69 @@ def test_evidence_of_other_lanes_is_not_this_task_s_state(kanban_home):
         assert not _events(conn, tid, "unreported_exit")[0].payload.get("parked")
     finally:
         conn.close()
+
+
+_SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"
+
+
+def test_salvaged_state_is_redacted_before_it_reaches_the_board(kanban_home):
+    """Checkpoint text, heartbeat notes and the worker's own log tail are quoted into
+    the park reason, ``last_failure_error``, the event state and a dispatcher comment
+    that seeds the next worker's prompt: a secret in any of them must not survive."""
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="leaky", assignee="worker")
+        run_id = _claim(conn, tid)
+        kbd.heartbeat_worker(conn, tid, note=f"pushed with {_SECRET}", expected_run_id=run_id)
+        kb.add_comment(
+            conn, tid, author="worker",
+            body=f"checkpoint: PR https://github.com/o/r/pull/839 token {_SECRET}",
+        )
+        log_path = kb.worker_log_path(tid)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(f"could not finish, key was {_SECRET}\n", encoding="utf-8")
+
+        _reap_clean_exit(conn, tid, 991130)
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "blocked"
+        payload = _events(conn, tid, "unreported_exit")[0].payload or {}
+        run = _latest_run(conn, tid)
+        comment = [c for c in kb.list_comments(conn, tid) if c.author == "dispatcher"][-1]
+        for where, text in (
+            ("last_failure_error", task.last_failure_error or ""),
+            ("run error", run.error or ""),
+            ("event payload", repr(payload)),
+            ("dispatcher comment", comment.body),
+        ):
+            assert _SECRET not in text, f"secret leaked into the {where}"
+        # Redaction masks the secret; the salvaged evidence itself survives.
+        assert "pull/839" in (task.last_failure_error or "")
+        assert "pull/839" in comment.body
+        assert "could not finish" in payload.get("worker_output", "")
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("as_json", [True, False])
+def test_cli_dispatch_surfaces_unreported_parks(kanban_home, monkeypatch, capsys, as_json):
+    """A tick whose only effect was parking an unreported exit must not read as a no-op."""
+    import argparse
+    import json
+
+    from hermes_cli import kanban as kb_cli
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    def _park_only_tick(conn, **_kw):
+        return kb.DispatchResult(unreported=["t_parked01"])
+
+    monkeypatch.setattr("hermes_cli.config.load_config", dict)
+    monkeypatch.setattr(_kbd, "dispatch_once", _park_only_tick)
+    kb_cli._cmd_dispatch(argparse.Namespace(dry_run=False, max=None, failure_limit=2, json=as_json))
+    out = capsys.readouterr().out
+    if as_json:
+        data = json.loads(out)
+        assert data["unreported"] == ["t_parked01"]
+        assert data["crashed"] == []
+    else:
+        assert "Unreported" in out and "t_parked01" in out

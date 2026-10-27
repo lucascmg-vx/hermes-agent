@@ -61,6 +61,12 @@ def test_active_tick_fires_hook_with_outcome_ok(
     result = ok_events[-1]["result"]
     assert any(row[0] == tid for row in result.spawned)
 
+def test_park_only_tick_is_not_idle(kanban_home, captured_ticks):
+    """A tick whose only effect was parking an unreported clean exit did work."""
+    kb._fire_dispatch_tick_hook(kb.DispatchResult(unreported=["t_parked01"]), board="default")
+    kb._fire_dispatch_tick_hook(kb.DispatchResult(), board="default")
+    assert [kw["outcome"] for kw in captured_ticks] == ["ok", "idle"]
+
 def test_tick_hook_fires_after_dispatch_lock_released(kanban_home):
     """The #56066 sweeper finding, as a contract: subscribers run OUTSIDE
     the single-writer critical section. From the callback, acquiring the

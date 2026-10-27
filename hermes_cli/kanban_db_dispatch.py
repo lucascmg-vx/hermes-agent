@@ -1081,7 +1081,10 @@ def _run_observable_state(
             "comment_id": int(row["id"]),
             "author": row["author"],
             "at": int(row["created_at"]),
-            "excerpt": " ".join(str(row["body"] or "").split())[:_UNREPORTED_EXCERPT_CHARS],
+            # Redact before cutting so a secret straddling the cut cannot leak a prefix.
+            "excerpt": _kb.redact_review_value(
+                " ".join(str(row["body"] or "").split())
+            )[:_UNREPORTED_EXCERPT_CHARS],
         })
     for row in conn.execute(
         "SELECT id, filename, created_at FROM task_attachments "
@@ -1106,7 +1109,9 @@ def _run_observable_state(
                 state["heartbeats"] += 1
                 note = (_kb._json_dict(row["payload"]) or {}).get("note")
                 if note:
-                    state["last_heartbeat_note"] = str(note)[:_UNREPORTED_EXCERPT_CHARS]
+                    state["last_heartbeat_note"] = _kb.redact_review_value(
+                        str(note)
+                    )[:_UNREPORTED_EXCERPT_CHARS]
     return state
 
 
@@ -1213,7 +1218,8 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     reason is usually sitting there: the model's own explanation of why it could
     not comply (#88603), or the rendered provider error (#46593). The reap used to
     discard it in favour of a canned message on every retry. Trims the CLI exit
-    summary, rule lines and the ``session_id:`` trailer; returns "" (never raises)
+    summary, rule lines and the ``session_id:`` trailer, and redacts secrets (the text
+    lands on the board and in the next worker's prompt); returns "" (never raises)
     on a missing/empty log.
 
     ``board`` must come from the dispatching tick: ambient current-board resolution
@@ -1235,7 +1241,7 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
         ln = _LOG_CHROME.sub("", ln).strip()
         if ln and not ln.startswith(_log_noise_prefixes()):
             lines.append(ln)
-    return " ".join(lines)[-400:]
+    return _kb.redact_review_value(" ".join(lines))[-400:]
 
 
 @dataclass
