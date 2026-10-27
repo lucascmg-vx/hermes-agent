@@ -124,7 +124,8 @@ class DispatchResult:
     telemetry can tell "stuck" from "correctly idle"."""
     skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
     """``(task_id, assignee, current_running_count)`` deferred because the
-    assignee is at ``kanban.max_in_progress_per_profile``. Picked up on a later
+    assignee is at its cap (``kanban.max_in_progress_per_profile_overrides``
+    entry, else ``kanban.max_in_progress_per_profile``). Picked up on a later
     tick; separate bucket so dashboards show "profile busy" vs "stuck"."""
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
