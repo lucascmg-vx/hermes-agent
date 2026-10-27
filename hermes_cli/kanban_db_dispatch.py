@@ -2051,13 +2051,30 @@ def normalize_profile_cap_overrides(raw: Any) -> dict[str, int]:
 def configured_per_profile_caps() -> tuple[Optional[int], dict[str, int]]:
     """Read ``(max_in_progress_per_profile, max_in_progress_per_profile_overrides)``
     from ``kanban.*`` config, so standalone daemon and dashboard dispatch nudges
-    enforce the same per-profile limits as the gateway and CLI."""
+    enforce the same per-profile limits as the gateway and CLI.
+
+    The uniform cap is parsed exactly as ``hermes kanban dispatch`` parses it.
+    An unreadable config is logged and yields no per-profile limits, matching
+    :func:`configured_max_in_progress`.
+    """
     try:
         from hermes_cli.config import load_config_readonly
         kcfg = (load_config_readonly() or {}).get("kanban", {})
-        if not isinstance(kcfg, Mapping):
-            return None, {}
-    except Exception:
+    except Exception as exc:
+        _kb._log.warning(
+            "kanban dispatcher: could not read kanban config for per-profile "
+            "caps (%s); dispatching without per-profile limits",
+            exc,
+        )
+        return None, {}
+    if kcfg is None:
+        return None, {}
+    if not isinstance(kcfg, Mapping):
+        _kb._log.warning(
+            "kanban dispatcher: invalid kanban config %r; expected a mapping, "
+            "dispatching without per-profile limits",
+            kcfg,
+        )
         return None, {}
     cap = _positive_int(kcfg.get("max_in_progress_per_profile"), None)
     overrides = normalize_profile_cap_overrides(
@@ -3034,9 +3051,11 @@ def run_daemon(
 
     Calls :func:`dispatch_once` every ``interval`` seconds; exits cleanly on
     SIGINT / SIGTERM so it is systemd-friendly. ``stop_event`` and ``on_tick``
-    are test hooks. Each tick resolves ``kanban.max_in_progress`` exactly like
-    the gateway dispatcher and ``hermes kanban dispatch`` — the standalone
-    daemon must not be the one uncapped entry point.
+    are test hooks. Each tick resolves ``kanban.max_in_progress``,
+    ``kanban.max_in_progress_per_profile`` and
+    ``kanban.max_in_progress_per_profile_overrides`` exactly like the gateway
+    dispatcher and ``hermes kanban dispatch`` — the standalone daemon must not
+    be the one uncapped entry point.
     """
     import threading
 

@@ -406,56 +406,209 @@ def test_parser_is_a_module_level_symbol():
     assert "hermes_cli.kanban_db_dispatch" in sys.modules
 
 
-def test_dispatcher_settings_default_factory_and_daemon_dashboard_parity(monkeypatch):
-    """_DispatcherSettings defaults max_in_progress_per_profile_overrides={}, and
-    both run_daemon and dashboard POST /dispatch honour configured per-profile caps."""
-    import threading
+def test_dispatcher_settings_overrides_default_to_empty_map():
+    """Positional callers that predate the field must keep constructing it."""
     from gateway.kanban_watchers_dispatcher import _DispatcherSettings
-    from hermes_cli import kanban_db_dispatch as kbd
 
-    # 1. Direct _DispatcherSettings construction without max_in_progress_per_profile_overrides works
-    s = _DispatcherSettings(
-        interval=60.0,
-        max_spawn=None,
-        max_in_progress=8,
-        failure_limit=3,
-        stale_timeout_seconds=0,
-        reconcile_orphans=True,
-        default_assignee=None,
-        max_in_progress_per_profile=2,
+    first = _DispatcherSettings(60.0, None, 8, 3, 0, True, None, 2)
+    second = _DispatcherSettings(60.0, None, 8, 3, 0, True, None, 2)
+    assert first.max_in_progress_per_profile_overrides == {}
+    # default_factory, not a shared mutable default.
+    assert (
+        first.max_in_progress_per_profile_overrides
+        is not second.max_in_progress_per_profile_overrides
     )
-    assert s.max_in_progress_per_profile_overrides == {}
 
-    # 2. configured_per_profile_caps reads both uniform cap and overrides
+
+# ---------------------------------------------------------------------------
+# Every dispatch surface reads the same config: daemon and dashboard too
+# ---------------------------------------------------------------------------
+
+
+def _patch_readonly_config(monkeypatch, kanban_cfg):
     monkeypatch.setattr(
         "hermes_cli.config.load_config_readonly",
-        lambda: {
-            "kanban": {
-                "max_in_progress": 6,
-                "max_in_progress_per_profile": 2,
-                "max_in_progress_per_profile_overrides": {"vx-design": 1, "bad": True},
-            }
-        },
+        lambda *a, **k: {"kanban": kanban_cfg},
     )
-    cap, overrides = kbd.configured_per_profile_caps()
+
+
+def test_configured_per_profile_caps_uses_the_shared_parser(monkeypatch, caplog):
+    _patch_readonly_config(monkeypatch, {
+        "max_in_progress_per_profile": "2",
+        "max_in_progress_per_profile_overrides": {"alpha": 1, "beta": True},
+    })
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        cap, overrides = kbd.configured_per_profile_caps()
+
     assert cap == 2
-    assert overrides == {"vx-design": 1}
+    assert overrides == {"alpha": 1}
+    assert any("'beta'" in r.getMessage() and "a boolean" in r.getMessage()
+               for r in caplog.records)
 
-    # 3. run_daemon forwards max_in_progress_per_profile and overrides to dispatch_once
-    captured_daemon = {}
-    stop_ev = threading.Event()
 
-    class _DummyConn:
-        def close(self):
-            pass
+def test_configured_per_profile_caps_logs_an_unreadable_config(monkeypatch, caplog):
+    def boom(*_a, **_k):
+        raise RuntimeError("config is unreadable")
 
-    def _fake_dispatch_once(conn, **kwargs):
-        captured_daemon.update(kwargs)
-        stop_ev.set()
-        return kbd.DispatchResult()
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", boom)
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
+        assert kbd.configured_per_profile_caps() == (None, {})
+    assert any("config is unreadable" in r.getMessage() for r in caplog.records)
 
-    monkeypatch.setattr(kbd, "dispatch_once", _fake_dispatch_once)
-    monkeypatch.setattr(kbd._kbc, "connect", lambda *a, **kw: _DummyConn())
-    kbd.run_daemon(interval=0.01, stop_event=stop_ev)
-    assert captured_daemon["max_in_progress_per_profile"] == 2
-    assert captured_daemon["max_in_progress_per_profile_overrides"] == {"vx-design": 1}
+
+def test_run_daemon_honours_overrides(kanban_home, all_assignees_spawnable, monkeypatch):
+    """``hermes kanban daemon``: 8 ready alpha cards under {alpha: 1} -> 1 spawn."""
+    import threading
+
+    _patch_readonly_config(monkeypatch, {
+        "max_in_progress_per_profile_overrides": {"alpha": 1},
+    })
+    monkeypatch.setattr(kbd, "derive_default_max_in_progress", lambda sample=None: None)
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        _seed(conn, "alpha", 8)
+
+    real_dispatch_once = kbd.dispatch_once
+    captured: dict = {}
+
+    def dispatch_with_fake_spawn(conn, **kwargs):
+        captured.update(kwargs)
+        return real_dispatch_once(conn, spawn_fn=_fake_spawn, **kwargs)
+
+    monkeypatch.setattr(kbd, "dispatch_once", dispatch_with_fake_spawn)
+    stop = threading.Event()
+    results: list = []
+
+    def on_tick(res):
+        results.append(res)
+        stop.set()
+
+    kbd.run_daemon(interval=0.01, stop_event=stop, on_tick=on_tick)
+
+    assert captured["max_in_progress_per_profile_overrides"] == {"alpha": 1}
+    assert len(results) == 1
+    assert _assignees(results[0], "spawned") == ["alpha"]
+    assert _assignees(results[0], "skipped_per_profile_capped").count("alpha") == 7
+
+
+def test_run_daemon_honours_the_uniform_per_profile_cap(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    import threading
+
+    _patch_readonly_config(monkeypatch, {"max_in_progress_per_profile": 2})
+    monkeypatch.setattr(kbd, "derive_default_max_in_progress", lambda sample=None: None)
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        _seed(conn, "alpha", 5)
+
+    real_dispatch_once = kbd.dispatch_once
+    monkeypatch.setattr(
+        kbd, "dispatch_once",
+        lambda conn, **kw: real_dispatch_once(conn, spawn_fn=_fake_spawn, **kw),
+    )
+    stop = threading.Event()
+    results: list = []
+
+    def on_tick(res):
+        results.append(res)
+        stop.set()
+
+    kbd.run_daemon(interval=0.01, stop_event=stop, on_tick=on_tick)
+
+    assert _assignees(results[0], "spawned") == ["alpha", "alpha"]
+
+
+def _dashboard_client():
+    import importlib.util
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    plugin_file = (
+        Path(__file__).resolve().parents[2]
+        / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "hermes_dashboard_plugin_kanban_overrides_test", plugin_file,
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    app = FastAPI()
+    app.include_router(mod.router, prefix="/api/plugins/kanban")
+    return TestClient(app)
+
+
+def test_dashboard_dispatch_honours_overrides(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """Dashboard ``POST /dispatch``: 8 ready alpha cards under {alpha: 1} -> 1."""
+    _patch_readonly_config(monkeypatch, {
+        "max_in_progress_per_profile": 4,
+        "max_in_progress_per_profile_overrides": {"alpha": 1},
+    })
+    with kbc.connect_closing() as conn:
+        kb.create_board(slug="default", name="Test")
+        _seed(conn, "alpha", 8)
+        _seed(conn, "beta", 6)
+
+    r = _dashboard_client().post("/api/plugins/kanban/dispatch?dry_run=true&max=20")
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    spawned = [row[1] for row in body["spawned"]]
+    capped = [row[1] for row in body["skipped_per_profile_capped"]]
+    assert spawned.count("alpha") == 1
+    assert capped.count("alpha") == 7
+    # beta is unlisted, so it falls back to the uniform cap of 4.
+    assert spawned.count("beta") == 4
+    assert capped.count("beta") == 2
+
+
+# ---------------------------------------------------------------------------
+# The review-lane reservation resolves the cap through the overrides map
+# ---------------------------------------------------------------------------
+
+
+def _review_case(conn, uniform, override):
+    """``reviewer`` already runs one worker; one ready card and one review card."""
+    busy = kb.create_task(conn, title="busy", assignee="reviewer")
+    assert kb.claim_task(conn, busy) is not None
+    ready_id = kb.create_task(conn, title="ready-now", assignee="alice")
+    review_id = kb.create_task(conn, title="review-me", assignee="reviewer")
+    _set_task_status(conn, review_id, "review")
+    res = kbd.dispatch_once(
+        conn, spawn_fn=_fake_spawn, max_in_progress=2,
+        max_in_progress_per_profile=uniform,
+        max_in_progress_per_profile_overrides={"reviewer": override},
+    )
+    return ready_id, review_id, [task_id for task_id, *_ in res.spawned]
+
+
+def test_review_at_its_override_does_not_reserve_the_ready_slot(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """Uniform cap unset, {reviewer: 1}: the review card is capped this tick.
+
+    Read through the uniform cap alone it looks spawnable, holds back the one
+    free slot, and the ready card starves while the reserved slot goes unused.
+    """
+    monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)
+    with kbc.connect_closing() as conn:
+        ready_id, _review_id, spawned = _review_case(conn, uniform=None, override=1)
+
+    assert spawned == [ready_id]
+
+
+def test_review_below_its_override_still_reserves_the_slot(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """Uniform cap 1 but {reviewer: 2}: the review card is spawnable and keeps
+    its reserved slot, though the uniform cap alone would call it capped."""
+    monkeypatch.setattr(kbd, "review_dispatch_enabled", lambda: True)
+    with kbc.connect_closing() as conn:
+        _ready_id, review_id, spawned = _review_case(conn, uniform=1, override=2)
+
+    assert spawned == [review_id]
