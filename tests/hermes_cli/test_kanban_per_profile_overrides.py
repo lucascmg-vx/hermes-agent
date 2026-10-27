@@ -72,8 +72,8 @@ def kanban_home(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db_path = kb.kanban_db_path().resolve()
     assert tmp_path.resolve() in db_path.parents, (
-        "fixture board escaped tmp_path: %s -- an inherited board-pinning "
-        "variable re-pinned the live board" % db_path
+        f"fixture board escaped tmp_path: {db_path} -- an inherited board-pinning "
+        "variable re-pinned the live board"
     )
     kb.init_db()
     return home
@@ -91,7 +91,7 @@ def _fake_spawn(*_args, **_kwargs):
 def _seed(conn, assignee: str, count: int) -> list[str]:
     """``count`` ready cards for one profile; returns their ids."""
     return [
-        kb.create_task(conn, title="%s-%d" % (assignee, i), assignee=assignee)
+        kb.create_task(conn, title=f"{assignee}-{i}", assignee=assignee)
         for i in range(count)
     ]
 
