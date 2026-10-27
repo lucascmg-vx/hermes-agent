@@ -9,6 +9,7 @@ engine works on sqlite3.Row objects as well as dataclasses.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from pathlib import Path
 
@@ -240,10 +241,15 @@ _LAST_CRASH_END = 1789234174        # 2026-09-12 17:29Z
 _NEWEST_END = 1789346851            # 2026-09-14 00:47Z
 
 
-def _run_at(outcome, run_id, started_at, ended_at, error=None, worker_pid=None):
+def _run_at(outcome, run_id, started_at, ended_at, error=None, worker_pid=None,
+            claim_lock="host:1234"):
+    """A ``task_runs`` row. Claimed by default (every run a dispatcher opens
+    carries ``claim_lock``); pass ``claim_lock=None`` for the zero-duration
+    row ``_synthesize_ended_run`` writes on a never-claimed card."""
     return {
         "id": run_id, "outcome": outcome, "error": error,
         "started_at": started_at, "ended_at": ended_at, "worker_pid": worker_pid,
+        "claim_lock": claim_lock,
     }
 
 
@@ -297,38 +303,103 @@ def test_repeated_crashes_finished_streak_is_historical_not_current():
     ]
 
 
-def test_repeated_crashes_synthesized_blocked_run_keeps_historical_warning():
-    """An operator/orchestrator block on an unclaimed card synthesizes a
-    zero-duration run (started_at == ended_at, worker_pid=None). That is not
-    evidence a worker booted, so the prior crash streak stays as a dated
-    historical warning."""
+def _crash_findings(task, runs):
+    return [d for d in kd.compute_task_diagnostics(task, [], runs)
+            if d.kind == "repeated_crashes"]
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "review_requested"])
+def test_repeated_crashes_synthesized_terminal_run_keeps_historical_warning(outcome):
+    """An operator blocking (or handing to review) a `ready` card makes
+    `_end_or_synthesize_run` write a zero-duration run with no claim. No worker
+    ran, so the crash streak stays a dated historical warning."""
     task = _task(status="ready")
-    runs = [_run_at("blocked", 6, 1789346472, 1789346472, error=None, worker_pid=None)]
+    runs = [_run_at(outcome, 6, 1789346472, 1789346472, claim_lock=None)]
     runs += _five_old_crashes()
 
     d = _crash_rule_diag(task, runs)
 
     assert d.severity == "warning"
     assert d.data["is_current"] is False
-    assert d.data["newest_outcome"] == "blocked"
-    assert "outcome=blocked" in d.detail
+    assert d.data["newest_outcome"] == outcome
+    assert f"outcome={outcome}" in d.detail
     assert "not a current crash" in d.detail
 
 
-def test_repeated_crashes_claimed_worker_blocked_or_review_requested_breaks_streak():
-    """A real claimed worker run that ended in `blocked` or `review_requested`
-    came from the worker's own terminal kanban call (kanban_block /
-    kanban_request_review), proving the agent booted and ran properly â€” it
-    breaks the crash streak just like `completed` / `reclaimed`."""
+@pytest.mark.parametrize("outcome", ["blocked", "review_requested"])
+@pytest.mark.parametrize("worker_pid", [4242, None])
+@pytest.mark.parametrize("started_at", [1789346111, 1789346472])
+def test_repeated_crashes_worker_block_or_review_request_breaks_streak(
+    outcome, worker_pid, started_at,
+):
+    """A claimed run that ended `blocked` / `review_requested` came from the
+    worker's own `kanban_block` / `kanban_request_review`: the agent booted and
+    ended properly, so the streak ends like it does on `completed`. The
+    reaper clears `worker_pid` once that worker exits, and a fast worker can
+    end in the second it was claimed, so the claim alone must be enough."""
     task = _task(status="ready")
-    for terminal_outcome in ("blocked", "review_requested"):
-        runs = [_run_at(terminal_outcome, 6, 1789346111, 1789346472, error=None, worker_pid=4242)]
-        runs += _five_old_crashes()
-        found = [
-            d for d in kd.compute_task_diagnostics(task, [], runs)
-            if d.kind == "repeated_crashes"
-        ]
-        assert found == [], f"expected {terminal_outcome} from claimed worker to break streak, got {found}"
+    runs = [_run_at(outcome, 6, started_at, 1789346472, worker_pid=worker_pid)]
+    runs += _five_old_crashes()
+
+    assert _crash_findings(task, runs) == []
+
+
+def test_repeated_crashes_claim_marker_matches_real_block_paths(kanban_home):
+    """The marker the rule reads, on rows the kanban DB itself writes: a
+    claimed run closed by `block_task` keeps `claim_lock`; an operator block of
+    a `ready` card synthesizes a run without one."""
+    conn = kbc.connect()
+    try:
+        worked = kb.create_task(conn, title="worked", assignee="w")
+        assert kb.claim_task(conn, worked) is not None
+        assert kb.block_task(conn, worked, reason="needs input")
+        operator = kb.create_task(conn, title="operator", assignee="w")
+        assert kb.block_task(conn, operator, reason="parked by operator")
+        worker_runs = kb.list_runs(conn, worked)
+        synth_runs = kb.list_runs(conn, operator)
+    finally:
+        conn.close()
+
+    assert [(r.outcome, bool(r.claim_lock)) for r in worker_runs] == [("blocked", True)]
+    assert [(r.outcome, bool(r.claim_lock)) for r in synth_runs] == [("blocked", False)]
+
+    # Newest by id, ahead of the five fixture crashes (ids 1..5).
+    worker_run = dataclasses.replace(worker_runs[0], id=6)
+    synth_run = dataclasses.replace(synth_runs[0], id=6)
+    task = _task(status="blocked")
+    assert _crash_findings(task, [worker_run] + _five_old_crashes()) == []
+    d = _crash_rule_diag(task, [synth_run] + _five_old_crashes())
+    assert d.severity == "warning" and d.data["is_current"] is False
+
+
+def test_repeated_crashes_worker_block_two_back_still_breaks_streak():
+    """The fleet's shape: crashed, crashed, then two real `kanban_block` runs
+    11 days apart. No crash finding, historical or current."""
+    task = _task(status="blocked")
+    runs = [
+        _run_at("blocked", 4, 1790300000, 1790300400),
+        _run_at("blocked", 3, 1789346111, 1789346472),
+        _run_at("crashed", 2, 1789233508, _LAST_CRASH_END, error=_PROTOCOL_ERR),
+        _run_at("crashed", 1, 1789233327, 1789233508, error="pid 364463 not alive"),
+    ]
+
+    assert _crash_findings(task, runs) == []
+
+
+@pytest.mark.parametrize("outcome", ["timed_out", "spawn_failed"])
+def test_repeated_crashes_non_worker_outcome_keeps_historical_warning(outcome):
+    """`timed_out` / `spawn_failed` are not a worker's own terminal call, so
+    they do not break the streak even on a claimed run."""
+    task = _task(status="ready")
+    runs = [_run_at(outcome, 6, 1789346111, _NEWEST_END)]
+    runs += _five_old_crashes()
+
+    d = _crash_rule_diag(task, runs)
+
+    assert d.severity == "warning"
+    assert d.data["is_current"] is False
+    assert d.data["newest_outcome"] == outcome
+    assert "not a current crash" in d.detail
 
 
 def test_repeated_crashes_finished_streak_behind_a_live_run_is_historical():

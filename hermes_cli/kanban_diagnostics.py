@@ -465,14 +465,16 @@ def _fmt_run_ts(ts: Any) -> str:
 
 def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Trailing run outcomes show >= cfg["crash_threshold"] (default 2)
-    consecutive ``crashed`` with no ``completed``/``reclaimed`` between. Fires
+    consecutive ``crashed`` with no ``completed``/``reclaimed`` -- or claimed
+    ``blocked``/``review_requested`` -- run between. Fires
     earlier than ``repeated_failures`` for a crash-specific heads-up and
     suppresses itself when the unified rule is about to fire.
 
     The streak is reported as a **current** incident only while the task's
     newest run is itself one of those crashes. A card that has since moved on
-    -- a newer run that ended ``unreported``/``blocked``, or one still in
-    flight -- keeps the historical streak in the report, dated, and at
+    -- a newer run that ended ``unreported``/``spawn_failed``/``timed_out``,
+    a synthesized (unclaimed) ``blocked``/``review_requested``, or one still
+    in flight -- keeps the historical streak in the report, dated, and at
     ``warning``: the crash rule must not assert a present-tense crash about a
     card whose newest run disproves it, and the page that pages only
     ``critical`` findings must not page about a crash streak that is over.
@@ -488,8 +490,9 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
         return []
 
     threshold = int(cfg.get("crash_threshold", 2))
-    # Count trailing consecutive 'crashed' outcomes; a success (or manual
-    # reclaim) breaks the streak, other outcomes neither count nor break it.
+    # Count trailing consecutive 'crashed' outcomes; a success, a manual
+    # reclaim, or a worker's own block/review request breaks the streak,
+    # other outcomes neither count nor break it.
     ordered = _runs_newest_first(runs)
     consecutive = 0
     last_err = None
@@ -504,23 +507,14 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
                 last_crash = r
         elif outcome in {"completed", "reclaimed"}:
             break
-        elif outcome in {"blocked", "review_requested"}:
-            # A real claimed worker run that ended in ``blocked`` or
-            # ``review_requested`` came from the worker's own terminal kanban
-            # call (``kanban_block`` / ``kanban_request_review``), which proves
-            # the agent booted and ran the task properly -- break the streak.
-            # An operator/orchestrator transition on an unclaimed card
-            # synthesizes a zero-duration run (no worker_pid, started_at ==
-            # ended_at); that is not evidence a worker ran, so keep scanning
-            # and let the historical-warning path report the prior crashes.
-            r_pid = _task_field(r, "worker_pid")
-            r_start = _task_field(r, "started_at")
-            r_end = _task_field(r, "ended_at")
-            is_claimed_worker_run = bool(r_pid) or (
-                r_start is not None and r_end is not None and r_start != r_end
-            )
-            if is_claimed_worker_run:
-                break
+        elif outcome in {"blocked", "review_requested"} and _task_field(r, "claim_lock"):
+            # Ended a claimed run: the worker's own terminal call
+            # (``kanban_block`` / ``kanban_request_review``) proves it booted
+            # and ran, like ``completed``. A run ``_synthesize_ended_run``
+            # wrote for a never-claimed card has no ``claim_lock`` and is not
+            # worker evidence, so it keeps scanning. ``worker_pid`` cannot
+            # tell them apart: the terminal-worker reaper clears it.
+            break
     if consecutive < threshold:
         return []
     newest = ordered[0]
