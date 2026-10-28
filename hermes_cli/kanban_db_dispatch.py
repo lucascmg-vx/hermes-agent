@@ -1037,11 +1037,11 @@ _UNREPORTED_EXIT_EVENT = "unreported_exit"
 # Comment excerpt kept in the park reason; the full state rides the event payload.
 _UNREPORTED_EXCERPT_CHARS = 160
 _UNREPORTED_REASON_CHARS = 500
-# Run-scoped event kinds a worker writes itself while making progress. An
-# allowlist, not a denylist: the dispatcher and the managed runtime stamp their
-# own run-scoped events (``spawned``, ``worker_bound``, ``worker_result``,
-# ``owner_admitted``, ``tip_scratch_workspace``, ...), and any of those counted
-# as work would park every clean exit instead of retrying it.
+# Run-scoped event kinds a worker writes itself while making progress, reported
+# in the salvaged state. An allowlist, not a denylist: the dispatcher and the
+# managed runtime stamp their own run-scoped events (``spawned``,
+# ``worker_bound``, ``worker_result``, ``owner_admitted``,
+# ``tip_scratch_workspace``, ...), which say nothing about the work.
 _RUN_WORKER_PROGRESS_EVENT_KINDS = frozenset({"heartbeat", "commented", "attached"})
 
 
@@ -1058,7 +1058,9 @@ def _run_observable_state(
     cross-lane contamination would be worse than the crash this replaces.
     Liveness (``heartbeats``) is recorded separately from checkpoints so an
     operator can tell "it was working and stopped talking" from "it left a
-    checkpoint naming a commit".
+    checkpoint naming a commit". Only heartbeats with a note
+    (``noted_heartbeats``) are the worker's own words; the runtime writes bare
+    ones on any agent activity.
     """
     now = int(now if now is not None else time.time())
     window_start = int(started_at or 0)
@@ -1068,6 +1070,7 @@ def _run_observable_state(
         "checkpoints": [],
         "attachments": [],
         "heartbeats": 0,
+        "noted_heartbeats": 0,
         "last_heartbeat_note": None,
         "events": {},
     }
@@ -1109,6 +1112,7 @@ def _run_observable_state(
                 state["heartbeats"] += 1
                 note = (_kb._json_dict(row["payload"]) or {}).get("note")
                 if note:
+                    state["noted_heartbeats"] += 1
                     state["last_heartbeat_note"] = _kb.redact_review_value(
                         str(note)
                     )[:_UNREPORTED_EXCERPT_CHARS]
@@ -1116,17 +1120,18 @@ def _run_observable_state(
 
 
 def _state_has_observable_work(state: Optional[dict]) -> bool:
-    """True when the run left anything observable about itself.
+    """True when the run left state a resumed worker could pick up.
 
-    A heartbeat counts: it is task- and run-bound proof the worker was alive and
-    driving tools, so a blind re-run restarts work that was already under way.
-    Only a run that recorded nothing at all falls back to the retry ladder.
+    A checkpoint comment, an attachment, or a heartbeat that carries a note. A
+    bare heartbeat does not count: the worker runtime writes one automatically on
+    any agent activity (``heartbeat_current_worker_from_env``), so a model that
+    only answered in prose leaves one too, and that run has nothing to resume.
     """
     if not state:
         return False
     return bool(
         state.get("checkpoints") or state.get("attachments")
-        or state.get("heartbeats") or state.get("events")
+        or state.get("noted_heartbeats")
     )
 
 
@@ -1617,7 +1622,8 @@ def detect_crashed_workers(conn: sqlite3.Connection, board: Optional[str] = None
     when the run left observable state behind it is PARKED with that state
     (``blocked``, ``block_kind='transient'``, surfaced via
     ``_last_unreported_parked``) instead of being re-run from scratch; a run
-    that left nothing observable keeps the bounded violation-only retry budget.
+    that left nothing observable (or whose clean exit is known only from a log
+    trailer, #121255) keeps the bounded violation-only retry budget.
     ``KANBAN_RATE_LIMIT_EXIT_CODE`` is a quota wall, released WITHOUT counting a
     failure and surfaced via the ``_last_rate_limited`` attribute (the return
     stays crashed-only).

@@ -149,19 +149,33 @@ def test_clean_exit_with_checkpoint_parks_card_instead_of_re_running(kanban_home
         conn.close()
 
 
-def test_liveness_alone_is_enough_state_to_park(kanban_home):
-    """A heartbeat is run-bound proof the worker was alive: do not re-run blind."""
+def test_a_noted_heartbeat_is_enough_state_to_park(kanban_home):
+    """A heartbeat note is the worker's own checkpoint: do not re-run blind."""
     conn = kbc.connect()
     try:
-        tid = kb.create_task(conn, title="liveness only", assignee="worker")
-        _claim(conn, tid, heartbeats=2)
+        tid = kb.create_task(conn, title="noted liveness", assignee="worker")
+        _claim(conn, tid, heartbeats=2, notes=True)
         _reap_clean_exit(conn, tid, 991101)
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert task.block_kind == "transient"
         payload = (_events(conn, tid, "unreported_exit")[0].payload or {})
         assert (payload.get("state") or {}).get("heartbeats") == 2
+        assert (payload.get("state") or {}).get("noted_heartbeats") == 2
         assert (payload.get("state") or {}).get("checkpoints") == []
+    finally:
+        conn.close()
+
+
+def test_bare_liveness_heartbeats_keep_the_retry(kanban_home):
+    """Noteless heartbeats are what the runtime writes on any activity, prose included."""
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="bare liveness", assignee="worker")
+        _claim(conn, tid, heartbeats=2)
+        _reap_clean_exit(conn, tid, 991102)
+        assert kb.get_task(conn, tid).status == "ready"
+        assert not _events(conn, tid, "unreported_exit")[0].payload.get("parked")
     finally:
         conn.close()
 
