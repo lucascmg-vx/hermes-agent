@@ -646,6 +646,8 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
     (naming the blocking parent(s) for ``ready``/``done``/``review`` so the UI renders an actionable toast)."""
     s = payload.status
     if s == "archived":
+        # Archiving a held card skips ``unhold_task`` on purpose: archive is
+        # terminal, not a release into dispatch, so there is nothing to re-gate.
         ok = kanban_db.archive_task(conn, task_id)
     else:
         with _map_errors(400, _StatusRejected, ValueError):

@@ -1178,7 +1178,8 @@ def create_task(
     the card is not claimable, not for one tick, and only ``unhold_task`` moves
     it out -- its creator, or the operator escape when the creator crashed.
     ``idempotency_key``: an existing non-archived task with the key is returned
-    instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
+    instead of a duplicate (with ``hold=True``, only if that task is held;
+    otherwise ``ValueError``). ``max_runtime_seconds``: cap before the dispatcher
     SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
     worker model (provider requires model); ``reasoning_effort`` is independent.
     ``creator_task_id``: inherit durable session/subscriptions independently of
@@ -1240,11 +1241,19 @@ def create_task(
     # race may insert twice, the next lookup stabilises on the newest.
     if idempotency_key:
         row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
+            "SELECT id, status FROM tasks WHERE idempotency_key = ? "
             "AND status != 'archived' "
             "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
         ).fetchone()
         if row:
+            if hold and row["status"] != "hold":
+                # Returning it would hand the filer a claimable card -- the
+                # create-vs-link race the hold exists to close.
+                raise ValueError(
+                    f"hold=True but idempotency_key {idempotency_key!r} already "
+                    f"names {row['id']} in status {row['status']!r}, not 'hold'; "
+                    "use a new key, or archive that card first"
+                )
             return row["id"]
 
     now = int(time.time())
@@ -2140,6 +2149,8 @@ def unhold_task(
 
     The single exit from ``hold``: every surface that releases one (the creator's
     ``kanban_unhold``, ``hermes kanban unhold``, a dashboard drag) routes here.
+    Archiving a held card is not a release and does not come here: archive is
+    terminal, so it records no ``unheld`` event and re-gates nothing.
 
     Returns ``(ok, detail)``; ``detail`` is the landing status on success and the
     refusal reason otherwise. Only the card's creator may clear it in-process:

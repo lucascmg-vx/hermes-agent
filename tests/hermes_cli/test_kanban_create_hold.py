@@ -209,6 +209,31 @@ def test_an_unheld_create_keeps_todays_behaviour(kanban_home):
             conn, title="triage", assignee="worker", triage=True)).status == "triage"
 
 
+def test_held_retry_returns_the_card_already_held_under_its_key(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _hold(conn, idempotency_key="k-held")
+        assert _hold(conn, idempotency_key="k-held") == tid
+        assert kb.get_task(conn, tid).status == "hold"
+        assert len(kb.list_tasks(conn, status="hold")) == 1
+
+
+@pytest.mark.parametrize("status", ["ready", "todo", "running"])
+def test_held_retry_refuses_a_claimable_card_under_its_key(kanban_home, status):
+    """Handing back a non-held card would reopen the create-vs-link race."""
+    with kbc.connect_closing() as conn:
+        tid = kb.create_task(conn, title="plain", assignee="worker",
+                             idempotency_key="k-plain")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, tid))
+        with pytest.raises(ValueError, match=f"{tid} in status '{status}', not 'hold'"):
+            _hold(conn, idempotency_key="k-plain")
+        assert kb.get_task(conn, tid).status == status
+        assert kb.list_tasks(conn, status="hold") == []
+        # Without hold the key keeps its plain idempotent meaning.
+        assert kb.create_task(conn, title="plain", assignee="worker",
+                              idempotency_key="k-plain") == tid
+
+
 def test_hold_refuses_the_other_parks(kanban_home):
     with kbc.connect_closing() as conn:
         for kw in ({"initial_status": "blocked"}, {"triage": True}):
@@ -240,6 +265,52 @@ def test_tool_creates_a_held_card_and_unholds_it(kanban_home, monkeypatch):
         assert kb.get_task(conn, tid).status == "ready"
         # Second clear is a refusal, not a silent no-op.
         assert "cannot unhold" in kt._handle_unhold({"task_id": tid})
+
+
+def test_tool_unhold_refuses_another_profiles_hold(kanban_home, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", "")
+    from tools import kanban_tools as kt
+
+    monkeypatch.setenv("HERMES_PROFILE", "profile-a")
+    tid = json.loads(kt._handle_create({"title": "a's card", "assignee": "worker",
+                                        "hold": True}))["task_id"]
+    monkeypatch.setenv("HERMES_PROFILE", "profile-b")
+    refused = kt._handle_unhold({"task_id": tid})
+    assert "cannot unhold" in refused
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).status == "hold"
+
+
+def test_filer_sequence_create_held_then_link_then_unhold(kanban_home):
+    """The race narrative end to end: the parent is attached only after the
+    create, and the clear still lands behind it."""
+    with kbc.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = _hold(conn, title="child", created_by="filer")
+        assert kb.claim_task(conn, child, claimer="worker") is None
+        kb.link_tasks(conn, parent, child)
+        assert kb.get_task(conn, child).status == "hold"
+        assert kb.unhold_task(conn, child, requester="filer") == (True, "todo")
+        assert kb.claim_task(conn, child, claimer="worker") is None
+
+
+def test_tool_rejects_a_held_retry_whose_key_names_a_claimable_card(kanban_home, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setenv("HERMES_PROFILE", "filer-profile")
+    monkeypatch.setenv("HERMES_SESSION_ID", "")
+    from tools import kanban_tools as kt
+
+    base = {"title": "chain head", "assignee": "worker", "idempotency_key": "k-tool"}
+    first = json.loads(kt._handle_create(dict(base)))
+    assert first["ok"] is True and first["status"] == "ready"
+
+    retry = json.loads(kt._handle_create({**base, "hold": True}))
+    assert retry.get("ok") is not True
+    assert "not 'hold'" in retry["error"]
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, first["task_id"]).status == "ready"
+        assert kb.list_tasks(conn, status="hold") == []
 
 
 def test_cli_hold_flag_and_unhold(kanban_home):

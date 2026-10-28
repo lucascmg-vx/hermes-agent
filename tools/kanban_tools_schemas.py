@@ -458,7 +458,9 @@ KANBAN_CREATE_SCHEMA = _schema(
                 "dispatcher may claim it before the first link lands. "
                 "Clear it with kanban_unhold once the links are in; only "
                 "the creating session may clear it (an operator can clear "
-                "an orphaned one with `hermes kanban unhold <id>`)."
+                "an orphaned one with `hermes kanban unhold <id>`). With "
+                "an idempotency_key that already names a card that is not "
+                "held, the create is refused rather than returning it."
         )),
         "idempotency_key": _prop("string", (
                 "If a non-archived task with this key already "
