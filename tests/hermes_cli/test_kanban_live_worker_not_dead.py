@@ -240,6 +240,66 @@ def test_worker_pid_absent_is_tri_state(monkeypatch):
     assert kbd._worker_pid_absent(0) is True
 
 
+@pytest.mark.parametrize("platform", ["darwin", "win32"])
+def test_live_worker_is_not_absent_off_linux(kanban_home, monkeypatch, platform):
+    """Without /proc the reclaim corroboration still asks the OS about the pid.
+
+    A failed ``_pid_alive`` beside a stale heartbeat must defer, not reclaim, when
+    the pid is in fact present: off Linux ``_worker_pid_absent`` used to answer
+    True for every pid, leaving the heartbeat as the only corroboration.
+    """
+    monkeypatch.setattr(gstatus.sys, "platform", platform)
+    live = os.getpid()
+    assert kbd._worker_pid_absent(live) is False
+
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    with kbc.connect() as conn:
+        tid, _ = _claim_running(conn, pid=live, heartbeat_age=3600)
+        crashed, deferred = _crashed_ids(conn)
+
+        assert crashed == []
+        assert deferred == [tid]
+        assert kb.get_task(conn, tid).status == "running"
+        payload = (_events(conn, tid, "reclaim_deferred")[0].payload or {})
+        assert payload.get("reason") == "pid_probe_unknown"
+
+
+def test_unknown_probe_on_a_dead_worker_is_released_by_the_stale_backstop(
+    kanban_home, monkeypatch,
+):
+    """A deferral on an unknown probe is not forever when the worker is dead.
+
+    The crash sweep keeps deferring while the probe stays unknown, but
+    ``detect_stale_running`` (on by default, ``dispatch_stale_timeout_seconds``
+    = 4h) does not consult the probe: it signals the pid, and the kernel's
+    ``ProcessLookupError`` is positive evidence the worker is gone.
+    """
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(kbd, "_worker_pid_absent", lambda _pid: False)
+
+    def _gone(_pid, _sig):
+        raise ProcessLookupError
+
+    with kbc.connect() as conn:
+        tid, run_id = _claim_running(conn, pid=991106, heartbeat_age=2 * 3600)
+        started = int(time.time()) - 5 * 3600
+        conn.execute("UPDATE tasks SET started_at = ? WHERE id = ?", (started, tid))
+        conn.execute("UPDATE task_runs SET started_at = ? WHERE id = ?", (started, run_id))
+        conn.commit()
+
+        crashed, deferred = _crashed_ids(conn)
+        assert crashed == [] and deferred == [tid]
+
+        reclaimed = kbd.detect_stale_running(
+            conn, stale_timeout_seconds=4 * 3600, signal_fn=_gone,
+        )
+        assert reclaimed == [tid]
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.worker_pid is None
+        assert _events(conn, tid, "stale")
+
+
 def test_poll_worker_exit_needs_a_positive_absence(monkeypatch):
     """The termination probe reads the same primitive, so it fails closed too."""
     monkeypatch.setattr(kbd.time, "sleep", lambda _seconds: None)

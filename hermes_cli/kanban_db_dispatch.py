@@ -1271,7 +1271,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
     A dead verdict is only acted on once it corroborates: the OS must
     positively report the pid gone (not merely unreadable) and the run's own
     heartbeat must be stale. A disagreement defers the card one tick instead of
-    clearing its claim â€” see ``_worker_pid_absent``.
+    clearing its claim — see ``_worker_pid_absent``.
     """
     sweep = _CrashSweep()
     with _kb.write_txn(conn):
@@ -1301,7 +1301,7 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            # ``_worker_alive`` said "not alive" â€” which happens when the PID is
+            # ``_worker_alive`` said "not alive" — which happens when the PID is
             # recycled, or when ``_pid_alive`` returned False (which is also what
             # a *failed* probe says). When the PID was not recycled by another
             # process, corroborate before booking the worker dead: the pid must
@@ -1312,8 +1312,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             worker_started_at = _kb._row_get(row, "worker_started_at")
             recycled = _kb._pid_alive(pid) and _pid_recycled(pid, worker_started_at)
             pid_absent = True if recycled else _worker_pid_absent(pid)
-            hb_at = _kb._row_get(row, "last_heartbeat_at")
-            hb_age = (now - int(hb_at)) if hb_at is not None else None
+            hb_at = _kb._to_epoch(_kb._row_get(row, "last_heartbeat_at"))
+            hb_age = (now - hb_at) if hb_at is not None else None
             if not pid_absent or (
                 hb_age is not None and hb_age < _LIVENESS_CORROBORATION_SECONDS
             ):

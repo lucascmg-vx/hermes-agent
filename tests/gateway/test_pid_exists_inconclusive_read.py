@@ -109,6 +109,48 @@ def test_confirmed_dead_is_tri_state(monkeypatch):
     assert gstatus._pid_confirmed_dead(os.getpid()) is False
 
 
+@pytest.mark.parametrize("platform", ["darwin", "win32", "freebsd14"])
+def test_confirmed_dead_off_linux_asks_the_os_not_a_constant(monkeypatch, platform):
+    """Without /proc a live pid is present: "dead" is a probe answer, never a default.
+
+    ``_worker_pid_absent`` reads this directly, so a constant True here would book
+    every live worker positively absent and leave reclaim corroboration to the
+    heartbeat alone.
+    """
+    monkeypatch.setattr(gstatus.sys, "platform", platform)
+    assert gstatus._pid_confirmed_dead(os.getpid()) is False
+
+    def _no_proc(*_args, **_kwargs):
+        raise AssertionError("there is no /proc off Linux")
+
+    monkeypatch.setattr(gstatus, "open", _no_proc, raising=False)
+    monkeypatch.setattr(gstatus, "_pid_exists", lambda _pid: True)
+    assert gstatus._pid_confirmed_dead(991109) is False
+    monkeypatch.setattr(gstatus, "_pid_exists", lambda _pid: False)
+    assert gstatus._pid_confirmed_dead(991109) is True
+
+
+def test_nosuchprocess_off_linux_is_trusted_without_proc(monkeypatch):
+    """Off Linux psutil's NoSuchProcess stands; /proc is never consulted."""
+    psutil = pytest.importorskip("psutil")
+
+    class _GoneProcess:
+        def __init__(self, _pid):
+            pass
+
+        def status(self):
+            raise psutil.NoSuchProcess(991110)
+
+    def _not_consulted(_pid):
+        raise AssertionError("no /proc confirmation off Linux")
+
+    monkeypatch.setattr(gstatus, "os", _PosixOs("os"))
+    monkeypatch.setattr(gstatus.sys, "platform", "darwin")
+    monkeypatch.setattr(psutil, "Process", _GoneProcess)
+    monkeypatch.setattr(gstatus, "_pid_confirmed_dead", _not_consulted)
+    assert gstatus._pid_exists(991110) is False
+
+
 class _PosixOs(types.ModuleType):
     """``os`` as seen by ``gateway.status``, but reporting ``name == "posix"``.
 

@@ -940,18 +940,19 @@ def _try_acquire_file_lock(handle) -> bool:
 
 
 def _pid_confirmed_dead(pid: int) -> bool:
-    """True only when /proc positively says ``pid`` is gone or a zombie (Linux).
+    """True only when the OS positively says ``pid`` is gone or a zombie.
 
     The authority behind an inconclusive psutil answer: psutil maps a FAILED
     /proc stat read onto NoSuchProcess/ZombieProcess (psutil #2418), so its
-    "gone" is not a death verdict. A missing /proc entry and ``State: Z`` are
-    conclusive; an unreadable entry (EACCES/EMFILE/ENOMEM under load) is not,
-    and must never be reported as death - one unreadable read is how nine live
-    kanban workers were booked dead in a single dispatcher sweep (#110352).
-    Off Linux there is no /proc to ask, so psutil's answer stands unchanged.
+    "gone" is not a death verdict. On Linux a missing /proc entry and
+    ``State: Z`` are conclusive; an unreadable entry (EACCES/EMFILE/ENOMEM
+    under load) is not, and must never be reported as death - one unreadable
+    read is how nine live kanban workers were booked dead in a single
+    dispatcher sweep (#110352). Off Linux there is no /proc, so the answer is
+    ``_pid_exists``'s, whose access-denied paths report the pid present.
     """
-    if _IS_WINDOWS or sys.platform != "linux":
-        return True
+    if sys.platform != "linux":
+        return not _pid_exists(pid)
     try:
         with open(f"/proc/{int(pid)}/status", "r", encoding="utf-8") as fh:
             state_line = next((ln for ln in fh if ln.startswith("State:")), "")
@@ -988,8 +989,11 @@ def _pid_exists(pid: int) -> bool:
                 return False
         except getattr(psutil, "NoSuchProcess", ()):
             # psutil folds a FAILED /proc read into NoSuchProcess/ZombieProcess
-            # (psutil #2418), so answer "dead" only when an independent probe
-            # confirms it; an inconclusive read is alive (NousResearch/hermes-agent#110352).
+            # (psutil #2418), so on Linux answer "dead" only when /proc confirms
+            # it; an inconclusive read is alive (NousResearch/hermes-agent#110352).
+            # Without /proc psutil's answer stands.
+            if sys.platform != "linux":
+                return False
             return not _pid_confirmed_dead(pid)
         except Exception:
             pass
