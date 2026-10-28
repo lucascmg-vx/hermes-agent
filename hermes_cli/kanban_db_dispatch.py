@@ -1570,10 +1570,12 @@ def check_respawn_guard(
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
-    handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
-    passes own those.
+    handoff event followed the comment, so the named profile must work on that
+    PR, or a deliberate re-queue arrived at/after it: status change, promote,
+    unblock or operator reclaim. A crash, an automatic stale-claim reclaim or
+    a no-op reassign do not lift it). The review lane skips the last two: they
+    are the *inputs* to a review handoff. Stale / dead claim locks are NOT a
+    guard reason — the reclaim passes own those.
     """
     row = conn.execute(
         "SELECT last_failure_error FROM tasks WHERE id = ?",
@@ -1643,9 +1645,12 @@ def check_respawn_guard(
     #    - a handoff AFTER the newest PR comment (operator reassign, reviewer
     #      changes_requested, review reopen) names the profile that must now
     #      work on THAT PR (#111910);
-    #    - an explicit re-queue AFTER the PR-URL comment (status change,
-    #      promote, unblock, reclaim) is a deliberate "run it again" — honor it
-    #      instead of deferring (mirroring ``recent_success`` above).
+    #    - an explicit re-queue AT/AFTER the PR-URL comment (status change,
+    #      promote, unblock, operator reclaim) is a deliberate "run it again" —
+    #      honor it instead of deferring (mirroring ``recent_success`` above).
+    #      Unlike ``recent_success``, an automatic stale-claim reclaim does not
+    #      count: a worker that crashed after posting its PR would otherwise be
+    #      re-spawned against that PR.
     pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
                                           cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
                 if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
@@ -1655,9 +1660,10 @@ def check_respawn_guard(
                 conn, "task_events", task_id, newest_pr,
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
             return None
-        if any(_rows_since(
+        if any(_is_pr_requeue_event(e["kind"], e["payload"]) for _, e in _rows_since(
                 conn, "task_events", task_id, newest_pr,
-                "AND kind IN ('status', 'promoted', 'promoted_manual', 'unblocked', 'reclaimed')")):
+                "AND kind IN ('status', 'promoted', 'promoted_manual', 'unblocked', 'reclaimed')",
+                cols=", kind, payload")):
             return None
         return "active_pr"
 
@@ -1680,6 +1686,16 @@ def _rows_since(conn: sqlite3.Connection, table: str, task_id: str, since: int, 
         t = unreadable if t is None else t
         if t is not None and (t > since if strict else t >= since):
             yield t, row
+
+
+def _is_pr_requeue_event(kind: str, payload: Optional[str]) -> bool:
+    """Only an operator ``reclaim_task`` (payload ``manual: true``) is a
+    deliberate re-queue among ``reclaimed`` events; ``release_stale_claims``
+    writes the same kind after a crash or expired claim."""
+    if kind != "reclaimed":
+        return True
+    data = _kb._json_or(payload, {})
+    return isinstance(data, dict) and data.get("manual") is True
 
 
 def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:

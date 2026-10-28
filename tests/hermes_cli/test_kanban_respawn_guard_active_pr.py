@@ -63,3 +63,53 @@ def test_active_pr_guard_honors_unblock_after_pr_comment(kanban_home: Path) -> N
         kb.unblock_task(conn, tid)
         assert kb.get_task(conn, tid).status == "ready"
         assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_active_pr_guard_honors_dependency_auto_promote_after_pr_comment(kanban_home: Path) -> None:
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="dependency", assignee="worker")
+        tid = kb.create_task(conn, title="PR then waits on dependency", assignee="worker", parents=[parent])
+        assert kb.get_task(conn, tid).status == "todo"
+        kb.add_comment(conn, tid, author="worker", body=PR_COMMENT)
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+        assert kb.complete_task(conn, parent, result="done") is True
+        kb.recompute_ready(conn)
+        assert kb.get_task(conn, tid).status == "ready"
+        kinds = [r["kind"] for r in conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ?", (tid,))]
+        assert "promoted" in kinds and "promoted_manual" not in kinds
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def _claim_on_this_host(conn, tid: str) -> None:
+    host = kb._claimer_id().split(":", 1)[0]
+    assert kb.claim_task(conn, tid, claimer=f"{host}:worker") is not None
+
+
+def test_active_pr_guard_holds_after_automatic_stale_claim_reclaim(kanban_home: Path) -> None:
+    """A worker that posted its PR URL and then died is reclaimed automatically;
+    that must not re-spawn the same assignee against its own PR."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="PR then crash", assignee="worker")
+        _claim_on_this_host(conn, tid)
+        kb.add_comment(conn, tid, author="worker", body=PR_COMMENT)
+        conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ?", (int(time.time()) - 3600, tid))
+
+        assert kb.release_stale_claims(conn, signal_fn=lambda _p, _s: None) == 1
+        assert kb.get_task(conn, tid).status == "ready"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'reclaimed'", (tid,),
+        ).fetchone()[0] == 1
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
+def test_active_pr_guard_honors_manual_reclaim_after_pr_comment(kanban_home: Path) -> None:
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="PR then operator reclaim", assignee="worker")
+        _claim_on_this_host(conn, tid)
+        kb.add_comment(conn, tid, author="worker", body=PR_COMMENT)
+
+        assert kb.reclaim_task(conn, tid, reason="re-run", signal_fn=lambda _p, _s: None) is True
+        assert kb.get_task(conn, tid).status == "ready"
+        assert kbd.check_respawn_guard(conn, tid) is None
