@@ -249,6 +249,20 @@ class TestFormatKanbanEventText:
         text = _format_kanban_event_text(self.SUB, self.TASK, ev, "")
         assert "timed out" in text
 
+    def test_gave_up_is_generic_breaker_text(self):
+        ev = SimpleNamespace(kind="gave_up", payload={
+            "failures": 3, "error": "worker timed out", "trigger_outcome": "timed_out",
+        })
+        text = _format_kanban_event_text(self.SUB, self.TASK, ev, "")
+        assert "gave up after 3 consecutive failures" in text
+        assert "spawn" not in text
+        assert text.endswith("\nworker timed out")
+
+    def test_gave_up_without_failure_count(self):
+        ev = SimpleNamespace(kind="gave_up", payload={})
+        text = _format_kanban_event_text(self.SUB, self.TASK, ev, "")
+        assert text.endswith("Kanban t_abc123 gave up after repeated failures; now blocked")
+
 
 class TestNotificationPollerLoopKanbanWiring:
     """Drive a real TUI subscription through ``_notification_poller_loop``.

@@ -420,6 +420,24 @@ describe('blocked task detail', () => {
     expect(screen.queryByText('needs_input')).toBeNull()
   })
 
+  it('marks a spawn-exhaustion blocked run as failed, but not a worker-raised block', async () => {
+    detail = {
+      ...blockedDetail,
+      task: { ...blockedDetail.task, block_kind: 'capability' },
+      runs: [
+        { id: 1, status: 'blocked', outcome: 'blocked', error: 'workspace root missing', summary: null },
+        { id: 2, status: 'blocked', outcome: 'blocked', error: null, summary: 'need the API key' }
+      ]
+    }
+    openDrawer()
+
+    fireEvent.click(await screen.findByRole('button', { name: en.runs(2) }))
+
+    const [spawnRun, workerRun] = screen.getAllByText('blocked', { selector: '[data-slot="badge"]' })
+    expect(spawnRun.className).toContain('text-destructive')
+    expect(workerRun.className).toContain('text-muted-foreground')
+  })
+
   it('fires the diagnostic unblock action as a PATCH to ready', async () => {
     detail = blockedDetail
     openDrawer()

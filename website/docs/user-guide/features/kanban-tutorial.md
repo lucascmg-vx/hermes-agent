@@ -218,13 +218,13 @@ hermes kanban create "Deploy to staging (missing creds)" \
     --max-retries 3
 ```
 
-The dispatcher tries to spawn the worker. Spawn fails (`RuntimeError: AWS_ACCESS_KEY_ID not set`). The dispatcher releases the claim, increments a failure counter, and tries again next tick. Because this example sets `--max-retries 3`, the circuit trips after three consecutive failures: the task goes to `blocked` with outcome `gave_up`. If you omit the flag, Hermes uses `kanban.failure_limit` (default: 2). No more retries until a human unblocks it.
+The dispatcher tries to spawn the worker. Spawn fails (`RuntimeError: AWS_ACCESS_KEY_ID not set`). The dispatcher releases the claim, increments a failure counter, and tries again next tick. Because this example sets `--max-retries 3`, the circuit trips after three consecutive failures: the task goes to `blocked` with a typed `blocked` event (`kind=capability`, reason = the spawn error). If you omit the flag, Hermes uses `kanban.failure_limit` (default: 2). The block is sticky: no more retries until a human unblocks it. (Timeout and crash trips use the separate `gave_up` event.)
 
 Click the blocked task:
 
-![Circuit breaker — 2 spawn_failed + 1 gave_up](/img/kanban-tutorial/11-drawer-gave-up.png)
+![Circuit breaker — 2 spawn_failed + 1 blocked](/img/kanban-tutorial/11-drawer-gave-up.png)
 
-Three runs, all with the same error on the `error` field. The first two are `spawn_failed` (retryable), the third is `gave_up` (terminal). The event log above shows the full sequence: `created → claimed → spawn_failed → claimed → spawn_failed → claimed → gave_up`.
+Three runs, all with the same error on the `error` field. The first two are `spawn_failed` (retryable), the third is `blocked` (terminal). The event log above shows the full sequence: `created → claimed → spawn_failed → claimed → spawn_failed → claimed → blocked`, and the card's block reason reads `capability`.
 
 On the terminal:
 
@@ -235,11 +235,11 @@ hermes kanban runs t_ef5d
 #       ! AWS_ACCESS_KEY_ID not set in deploy-bot env
 # 2   spawn_failed   deploy-bot          0s  2026-04-27 19:34
 #       ! AWS_ACCESS_KEY_ID not set in deploy-bot env
-# 3   gave_up        deploy-bot          0s  2026-04-27 19:34
+# 3   blocked        deploy-bot          0s  2026-04-27 19:34
 #       ! AWS_ACCESS_KEY_ID not set in deploy-bot env
 ```
 
-If Telegram / Discord / Slack is wired in, a gateway notification fires on the `gave_up` event so you hear about the outage without having to check the board.
+If Telegram / Discord / Slack is wired in, a gateway notification fires on the `blocked` event (with the spawn error as its reason) so you hear about the outage without having to check the board.
 
 ### Crash recovery — worker dies mid-flight
 

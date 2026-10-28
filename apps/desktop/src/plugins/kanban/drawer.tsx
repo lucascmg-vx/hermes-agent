@@ -770,13 +770,17 @@ function FeedTabs({
         <ScrollFade max="11rem">
           <ul className="flex flex-col gap-1.5">
             {detail.runs.map(run => {
-              const failed = ['crashed', 'failed', 'timed_out', 'gave_up'].includes(run.outcome ?? run.status)
+              const outcome = run.outcome ?? run.status
+
+              // Spawn exhaustion closes the run `blocked` with an error; a worker's own block carries only a summary.
+              const failed =
+                ['crashed', 'failed', 'timed_out', 'gave_up'].includes(outcome) || (outcome === 'blocked' && !!run.error)
 
               return (
                 <li className="flex flex-col gap-0.5 text-[0.6875rem]" key={run.id}>
                   <div className="flex items-center gap-2">
                     <Badge size="xs" variant={failed ? 'destructive' : 'muted'}>
-                      {run.outcome ?? run.status}
+                      {outcome}
                     </Badge>
                     {run.profile && <span className="text-(--ui-text-tertiary)">{run.profile}</span>}
                     {duration(run.started_at, run.ended_at) && (

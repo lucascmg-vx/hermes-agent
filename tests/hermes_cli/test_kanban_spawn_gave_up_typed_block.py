@@ -1,7 +1,7 @@
 """Circuit-breaker spawn give-up is a typed capability block.
 
 A workspace/project/capability spawn that burns ``effective_limit`` retries
-used to land in ``blocked`` with a ``gave_up`` event and empty comments â€”
+used to land in ``blocked`` with a ``gave_up`` event and empty comments —
 indistinguishable from a ``needs_input`` open-questions block. The trip now
 writes ``block_kind=capability`` and a ``blocked`` event whose reason is the
 error. Timeout/crash trips and worker ``needs_input`` blocks are unchanged.

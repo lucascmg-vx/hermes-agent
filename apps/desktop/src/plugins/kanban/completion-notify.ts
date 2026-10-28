@@ -181,6 +181,15 @@ function notifyOne(kind: string, spec: { titleKey: string; toast: ToastKind }, e
   }
 }
 
+/** The dispatcher's spawn circuit breaker parks the card with a typed
+ *  `blocked` event (kind=capability, trigger_outcome=spawn_failed) rather than
+ *  `gave_up`. Nobody asked the user a question, so it notifies as a give-up. */
+function notifyKindFor(ev: CompletionEvent): string {
+  const kind = ev.kind ?? ''
+
+  return kind === 'blocked' && ev.payload?.trigger_outcome === 'spawn_failed' ? 'gave_up' : kind
+}
+
 /** Consume one /events frame for a board. Returns true when a terminal-event
  *  notification was fired. Never throws: notification failure cannot
  *  interfere with api.ts cache invalidation. */
@@ -206,11 +215,12 @@ export async function onKanbanEventsFrame(slug: string, events?: CompletionEvent
 
     cursor = ev.id
     seenEventIdByBoard.set(slug, cursor)
-    const spec = TERMINAL_NOTIFY.get(ev.kind ?? '')
+    const kind = notifyKindFor(ev)
+    const spec = TERMINAL_NOTIFY.get(kind)
 
     if (spec) {
       try {
-        notifyOne(ev.kind!, spec, ev)
+        notifyOne(kind, spec, ev)
         fired = true
       } catch {
         /* swallowed */

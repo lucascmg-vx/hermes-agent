@@ -443,6 +443,28 @@ describe('terminal kinds beyond completed', () => {
     expect(hostMock.notify.mock.calls[2][0]).toMatchObject({ kind: 'warning', message: 't103' })
   })
 
+  it('spawn-exhaustion capability block notifies as a give-up, not as needs-your-input', async () => {
+    const m = await loadModule()
+    m.bindCompletionNotify(makeRest(() => 100) as never)
+
+    const error = 'workspace root missing: /srv/checkout'
+    await m.onKanbanEventsFrame('smoke', [
+      ev(101, 'blocked', { kind: 'capability', reason: error, error, trigger_outcome: 'spawn_failed', failures: 3 })
+    ])
+    const spawnBlock = lastNotify()
+    expect(spawnBlock.kind).toBe('error')
+    expect(spawnBlock.title).toBe('Task stopped')
+    expect(spawnBlock.message).not.toContain(error)
+    expect(spawnBlock.detail).toBe(`t101 · ${error}`)
+
+    await m.onKanbanEventsFrame('smoke', [ev(102, 'blocked', { kind: 'capability', reason: 'no GPU on this host' })])
+    expect(lastNotify()).toMatchObject({
+      kind: 'warning',
+      title: 'Task blocked — needs your input',
+      message: 'no GPU on this host'
+    })
+  })
+
   it('gave_up without a payload error still gets the plain-words body and no empty detail noise', async () => {
     const m = await loadModule()
     m.bindCompletionNotify(makeRest(() => 100) as never)

@@ -451,7 +451,8 @@ def _fmt_block_loop_detected(ev, n) -> tuple:
 
 def _fmt_gave_up(ev, n) -> tuple:
     # The dispatcher auto-blocked the task after ``failures`` consecutive non-success attempts
-    # (spawn failure, crash, or timeout alike): it is now Blocked and waiting for a human.
+    # (crash or timeout): it is now Blocked and waiting for a human. Spawn exhaustion is a
+    # typed ``blocked`` event (kind=capability) and goes through ``_fmt_blocked`` instead.
     failures = _payload(ev, "failures")
     count = (t("gateway.kanban.ping.failed_n_times", count=int(failures)) if failures
              else t("gateway.kanban.ping.kept_failing"))

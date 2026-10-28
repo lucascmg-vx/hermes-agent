@@ -3148,8 +3148,9 @@ def block_task(
         ).fetchone()
         if cur_row is None:
             return False
-        # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
-        # ``block_kind`` and no ``blocked`` event -- the policy is the
+        # A timeout/crash breaker trip (``_record_task_failure``) parks cards
+        # ``blocked`` with no ``block_kind`` and no ``blocked`` event (a
+        # spawn-exhaustion trip arrives pre-typed ``capability``) -- the policy is the
         # supervisor's, not the kernel's -- but the transition guard below only
         # matches running/ready, so that policy could never be attached later
         # (#117363). Classify in place; never re-type or flap status. A caller
