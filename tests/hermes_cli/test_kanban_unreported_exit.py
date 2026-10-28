@@ -232,6 +232,29 @@ def test_evidence_of_other_lanes_is_not_this_task_s_state(kanban_home):
         conn.close()
 
 
+def test_runtime_stamped_run_events_are_not_worker_progress(kanban_home):
+    """Events the dispatcher and the managed runtime write on the run are not work.
+
+    A managed ``chat -q`` worker that answers in prose and exits ``rc=0`` still
+    leaves ``tip_scratch_workspace`` / ``owner_admitted`` / ``worker_bound`` /
+    ``worker_result`` on its run. Counting those parked every such exit instead of
+    retrying it.
+    """
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(conn, title="prose only", assignee="worker")
+        run_id = _claim(conn, tid)
+        with kb.write_txn(conn):
+            for kind in ("tip_scratch_workspace", "owner_admitted", "worker_bound", "worker_result"):
+                kb._append_event(conn, tid, kind, {"pid": 1}, run_id=run_id)
+        _reap_clean_exit(conn, tid, 991130)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready", f"runtime bookkeeping alone must retry, got {task.status}"
+        assert not _events(conn, tid, "unreported_exit")[0].payload.get("parked")
+    finally:
+        conn.close()
+
+
 _SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB"
 
 

@@ -84,6 +84,29 @@ def test_fresh_process_sweep_books_the_logged_exit_code(kanban_home, rc, event, 
             assert run["outcome"] == "rate_limited"
 
 
+def test_trailer_only_clean_exit_is_retried_not_parked(kanban_home):
+    """The log is append-mode across attempts (#121255), so a trailer may belong to an
+    earlier attempt: a heartbeating run whose only exit witness is the trailer keeps the
+    bounded retry instead of being parked on a possibly stale rc=0."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="a")
+        _dead_worker_with_log(conn, tid, 70003, 0)
+        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (tid,))
+        run_id = kb._current_run_id(conn, tid)
+        with kb.write_txn(conn):
+            kb._append_event(conn, tid, "heartbeat", {"note": "alive"}, run_id=run_id)
+
+        kbd.detect_crashed_workers(conn)
+
+        task = kb.get_task(conn, tid)
+        ev = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='unreported_exit'", (tid,)).fetchone()
+        payload = kb._json_dict(ev["payload"])
+        assert task.status == "ready"
+        assert payload.get("exit_source") == "log_trailer"
+        assert not payload.get("parked")
+
+
 def test_violation_budget_trip_holds_until_operator_unblock(kanban_home):
     """The third consecutive clean exit trips the violation budget and ``recompute_ready``
     must not promote the card back the same tick (``consecutive_failures`` is still below

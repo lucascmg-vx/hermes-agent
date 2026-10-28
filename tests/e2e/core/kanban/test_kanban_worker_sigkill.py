@@ -153,8 +153,11 @@ def test_sigkilled_worker_is_reclaimed_and_the_retry_completes_once(scenario: Sc
     sc, b = scenario, scenario.board
     runs = b.runs(sc.tid)
     outcomes = [r["outcome"] for r in runs]
-    # attempt 1 (violation), attempt 2 (SIGKILL), operator claim (expired), attempt 3.
-    assert outcomes == ["crashed", "crashed", "reclaimed", "completed"], b.diag(sc.tid)
+    # attempt 1 (unreported clean exit, nothing to salvage, retried), attempt 2 (SIGKILL; booked
+    # off attempt 1's trailer until #121255 is fixed, which the known gate below pins), operator
+    # claim (expired), attempt 3.
+    assert outcomes[0] == "unreported" and outcomes[1] in ("crashed", "unreported"), b.diag(sc.tid)
+    assert outcomes[2:] == ["reclaimed", "completed"], b.diag(sc.tid)
     assert runs[1]["worker_pid"] == sc.w2 and runs[1]["ended_at"], b.diag(sc.tid)
     task = b.task(sc.tid)
     assert task["status"] == "done" and task["worker_pid"] is None and task["claim_lock"] is None

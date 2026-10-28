@@ -1037,12 +1037,12 @@ _UNREPORTED_EXIT_EVENT = "unreported_exit"
 # Comment excerpt kept in the park reason; the full state rides the event payload.
 _UNREPORTED_EXCERPT_CHARS = 160
 _UNREPORTED_REASON_CHARS = 500
-# Run-scoped event kinds that describe the run's own bookkeeping, not observable
-# work by the worker.
-_RUN_BOOKKEEPING_EVENT_KINDS = frozenset({
-    "claimed", "spawned", "reclaimed", "protocol_violation", "unreported_exit",
-    "status", "unblocked", "budget_summary",
-})
+# Run-scoped event kinds a worker writes itself while making progress. An
+# allowlist, not a denylist: the dispatcher and the managed runtime stamp their
+# own run-scoped events (``spawned``, ``worker_bound``, ``worker_result``,
+# ``owner_admitted``, ``tip_scratch_workspace``, ...), and any of those counted
+# as work would park every clean exit instead of retrying it.
+_RUN_WORKER_PROGRESS_EVENT_KINDS = frozenset({"heartbeat", "commented", "attached"})
 
 
 def _run_observable_state(
@@ -1102,7 +1102,7 @@ def _run_observable_state(
             (task_id, int(run_id)),
         ).fetchall():
             kind = row["kind"]
-            if kind in _RUN_BOOKKEEPING_EVENT_KINDS:
+            if kind not in _RUN_WORKER_PROGRESS_EVENT_KINDS:
                 continue
             state["events"][kind] = state["events"].get(kind, 0) + 1
             if kind == "heartbeat":
@@ -1311,12 +1311,15 @@ def _classify_dead_worker_exit(
     that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash.
     """
     kind, code = _classify_worker_exit(pid)
+    exit_source = "reaped"
     if exit_code is not None:
         kind, code = _exit_code_kind(int(exit_code))
+        exit_source = "authority"
     elif kind == "unknown" and task_id:
         logged = _worker_log_exit_code(task_id, board=board)
         if logged is not None:
             kind, code = _exit_code_kind(logged)
+            exit_source = "log_trailer"
     if kind == "clean_exit":
         # rc=0 while still ``running``: the worker never made a terminal call.
         # Whether that run is parked-with-state or retried is decided in
@@ -1330,7 +1333,8 @@ def _classify_dead_worker_exit(
             # ``protocol_violation`` is the durable marker for
             # _protocol_violation_streak: _end_run copies this payload into the
             # run metadata.
-            {"pid": pid, "claimer": claimer, "exit_code": code, "protocol_violation": True},
+            {"pid": pid, "claimer": claimer, "exit_code": code, "protocol_violation": True,
+             "exit_source": exit_source},
             protocol_violation=True, unreported=True,
         )
     if kind == "rate_limited":
@@ -1426,13 +1430,18 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             route_event_kind, route_payload = None, {}
             park_state: Optional[dict] = None
             if dead.unreported:
-                # Read what THIS run left behind, while the run window is still
-                # open, and let that decide park vs retry.
-                park_state = _run_observable_state(
-                    conn, row["id"],
-                    run_id=_kb._row_get(row, "current_run_id"),
-                    started_at=_kb._row_get(row, "run_started_at") or started_at,
-                )
+                # A log trailer is not run-scoped yet (the log is append-mode
+                # across attempts, #121255): a SIGKILLed attempt can read the
+                # previous attempt's rc=0. Parking on that would strand a killed
+                # worker, so a trailer-only clean exit keeps the bounded retry.
+                if dead.event_payload.get("exit_source") != "log_trailer":
+                    # Read what THIS run left behind, while the run window is
+                    # still open, and let that decide park vs retry.
+                    park_state = _run_observable_state(
+                        conn, row["id"],
+                        run_id=_kb._row_get(row, "current_run_id"),
+                        started_at=_kb._row_get(row, "run_started_at") or started_at,
+                    )
                 if _state_has_observable_work(park_state):
                     # The worker skipped the terminal call; the dispatcher makes
                     # it, through the same typed block a worker would have used.
