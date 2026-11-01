@@ -686,6 +686,40 @@ def _repo_root_for_worktree_target(path: Path) -> Optional[Path]:
         current = current.parent
 
 
+def _worktree_start_point(repo_root: Path) -> str:
+    """The ref a NEW task branch starts from: the remote default, not the anchor's HEAD.
+
+    The anchor is a shared checkout that other workers (and people) move between
+    branches, so its HEAD can be any unrelated branch at the moment of the cut.
+    ``worktree_ops._resolve_worktree_base`` is not reused because it prefers the
+    current branch's upstream, which is exactly the parked branch here.
+
+    Order: ``origin/HEAD``'s branch, then ``origin/main``, then ``HEAD``. ``HEAD``
+    also wins when the anchor sits on that base branch with unpushed commits, since
+    cutting from the remote would drop work no PR contains yet. No fetch: the
+    cached remote-tracking ref is used as-is.
+    """
+    candidates: list[str] = []
+    remote_head = _git(repo_root, "symbolic-ref", "--quiet", "--short",
+                       "refs/remotes/origin/HEAD", timeout=30)
+    if remote_head.returncode == 0 and remote_head.stdout.strip():
+        candidates.append(remote_head.stdout.strip().split("/", 1)[-1])
+    candidates.append("main")
+    for candidate in candidates:
+        ref = f"origin/{candidate}"
+        exists = _git(repo_root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
+                      timeout=30)
+        if exists.returncode != 0 or not exists.stdout.strip():
+            continue
+        if _git_current_branch(repo_root) == candidate:
+            ahead = _git(repo_root, "rev-list", "--count", f"{ref}..HEAD",
+                         timeout=30).stdout.strip()
+            if ahead.isdigit() and int(ahead) > 0:
+                return "HEAD"
+        return ref
+    return "HEAD"
+
+
 def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> None:
     """Materialize ``target`` as a linked git worktree under ``repo_root``."""
     target = target.expanduser()
@@ -696,7 +730,10 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
     if _git_branch_exists(repo_root, branch_name):
         args = ["worktree", "add", str(target), branch_name]
     else:
-        args = ["worktree", "add", "-b", branch_name, str(target), "HEAD"]
+        # --no-track: a remote-tracking start point would otherwise make the task
+        # branch track origin/<base>, and a plain `git push` would target the base.
+        args = ["worktree", "add", "--no-track", "-b", branch_name, str(target),
+                _worktree_start_point(repo_root)]
     result = _git(repo_root, *args, timeout=60)
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
