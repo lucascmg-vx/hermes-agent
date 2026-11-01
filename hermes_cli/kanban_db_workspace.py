@@ -704,7 +704,8 @@ def _worktree_start_point(repo_root: Path) -> str:
                        "refs/remotes/origin/HEAD", timeout=30)
     if remote_head.returncode == 0 and remote_head.stdout.strip():
         candidates.append(remote_head.stdout.strip().split("/", 1)[-1])
-    candidates.append("main")
+    if "main" not in candidates:
+        candidates.append("main")
     for candidate in candidates:
         ref = f"origin/{candidate}"
         exists = _git(repo_root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",

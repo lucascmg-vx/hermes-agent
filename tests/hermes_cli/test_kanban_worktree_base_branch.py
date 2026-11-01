@@ -133,6 +133,20 @@ def test_unpushed_commits_on_the_base_branch_are_kept(tmp_path):
     assert _git(worktree, "rev-parse", "HEAD") == local_tip
 
 
+def test_anchor_behind_its_base_cuts_from_the_remote(tmp_path):
+    """An anchor on main that merely lags origin/main gets the newer remote tip."""
+    anchor = _anchor(tmp_path)
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", "-b", "main", str(tmp_path / "app.git"), str(other))
+    remote_tip = _commit(other, "newer\n", "pushed elsewhere")
+    _git(other, "push", "-q", "origin", "main")
+    _git(anchor, "fetch", "-q", "origin")
+
+    assert _worktree_start_point(anchor) == "origin/main"
+    worktree = _cut(anchor, tmp_path)
+    assert _git(worktree, "rev-parse", "HEAD") == remote_tip
+
+
 def test_no_remote_falls_back_to_head(tmp_path):
     """A repo with no ``origin`` keeps the old behaviour rather than failing."""
     anchor = tmp_path / "lonely"
